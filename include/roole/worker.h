@@ -64,8 +64,13 @@ int task_queue_is_empty(task_queue_t *queue);
 typedef struct router_connection {
     node_id_t router_id;
     char ip[MAX_IP_LEN];
-    uint16_t port;
-    rpc_channel_t *rpc_channel;
+    uint16_t service_port;  // Port for SERVICE channel
+    uint16_t data_port;     // Port for DATA channel
+
+    // Separate RPC channels for service and data communication
+    rpc_channel_t *service_channel;  // For heartbeat, registration, catalog sync
+    rpc_channel_t *data_channel;     // For execution updates
+
     uint64_t last_sync_ms;
     int active;
 } router_connection_t;
@@ -76,31 +81,32 @@ typedef struct router_connection {
 
 typedef struct worker_state {
     node_id_t worker_id;
-    uint16_t port;
-    
+    uint16_t service_port;  // Port for SERVICE channel (heartbeat, registration)
+    uint16_t data_port;     // Port for DATA channel (message processing)
+
     // DAG catalog (read-only, synced from routers)
     dag_catalog_t dag_catalog;
     uint64_t catalog_version;
-    
+
     // Task execution
     task_queue_t task_queue;
     uint32_t active_executions;
-    
+
     // Router connections
     router_connection_t routers[MAX_ROUTER_CONNECTIONS];
     size_t router_count;
     pthread_mutex_t routers_lock;
-    
+
     // Cluster membership
     cluster_view_t cluster_view;
     membership_handle_t *membership;
-    
+
     // Worker threads
     pthread_t executor_threads[16];
     size_t num_executor_threads;
-    
+
     pthread_t heartbeat_thread;
-    
+
     int shutdown_flag;
 } worker_state_t;
 
@@ -109,7 +115,8 @@ typedef struct worker_state {
 // ============================================================================
 
 // Initialization
-int worker_init(worker_state_t *worker, node_id_t worker_id, uint16_t port, 
+int worker_init(worker_state_t *worker, node_id_t worker_id,
+               uint16_t service_port, uint16_t data_port,
                size_t num_executor_threads);
 int worker_start(worker_state_t *worker);
 void worker_shutdown(worker_state_t *worker);
@@ -121,7 +128,7 @@ int worker_enqueue_task(worker_state_t *worker, execution_id_t exec_id,
 
 // Router communication
 int worker_add_router(worker_state_t *worker, node_id_t router_id,
-                     const char *ip, uint16_t port);
+                     const char *ip, uint16_t service_port, uint16_t data_port);
 int worker_remove_router(worker_state_t *worker, node_id_t router_id);
 
 int worker_send_heartbeat(worker_state_t *worker);
@@ -129,7 +136,8 @@ int worker_send_execution_update(worker_state_t *worker, node_id_t router_id,
                                 execution_id_t exec_id, execution_status_t status);
 
 // Worker registration
-int worker_register_with_router(worker_state_t *worker, const char *router_ip, uint16_t router_port);
+int worker_register_with_router(worker_state_t *worker, const char *router_ip,
+                                uint16_t service_port, uint16_t data_port);
 
 // DAG catalog sync
 int worker_sync_catalog_from_router(worker_state_t *worker, node_id_t router_id);

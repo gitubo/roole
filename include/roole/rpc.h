@@ -68,11 +68,26 @@ typedef struct rpc_header {
 } rpc_header_t;
 
 // ============================================================================
+// RPC CHANNEL TYPES
+// ============================================================================
+
+typedef enum {
+    RPC_CHANNEL_SERVICE = 0,  // Heartbeat, registration, catalog sync, cluster management
+    RPC_CHANNEL_DATA = 1,     // Message processing, execution updates
+    RPC_CHANNEL_INGRESS = 2   // Client requests (Router only)
+} rpc_channel_type_t;
+
+// Channel type to function ID mapping helper
+// Returns the appropriate channel type for a given function ID
+rpc_channel_type_t rpc_get_channel_for_func(uint8_t func_id);
+
+// ============================================================================
 // RPC CHANNEL (I/O Context)
 // ============================================================================
 
 typedef struct rpc_channel {
     int socket_fd;
+    rpc_channel_type_t channel_type;
     uint8_t *rx_buffer;
     size_t rx_buffer_size;
     size_t rx_data_len;
@@ -133,14 +148,32 @@ typedef struct rpc_service_entry {
 } rpc_service_entry_t;
 
 // ============================================================================
+// MULTI-CHANNEL LISTENER (Support for multiple ports/channel types)
+// ============================================================================
+
+#define MAX_CHANNEL_TYPES 3
+
+typedef struct rpc_listener {
+    int listener_fd;
+    rpc_channel_type_t channel_type;
+    uint16_t port;
+} rpc_listener_t;
+
+typedef struct rpc_multi_channel_listener {
+    rpc_listener_t listeners[MAX_CHANNEL_TYPES];
+    size_t count;
+    int epoll_fd;
+} rpc_multi_channel_listener_t;
+
+// ============================================================================
 // CORE RPC FUNCTIONS (Serialization/Channel Management)
 // ============================================================================
 
-int rpc_channel_init(rpc_channel_t *channel, int fd, size_t buffer_size);
+int rpc_channel_init(rpc_channel_t *channel, int fd, rpc_channel_type_t type, size_t buffer_size);
 void rpc_channel_destroy(rpc_channel_t *channel);
 
-size_t rpc_pack_message(uint8_t *buffer, node_id_t node_id, uint32_t request_id, 
-                         uint8_t type, uint8_t status, uint8_t func_id, 
+size_t rpc_pack_message(uint8_t *buffer, node_id_t node_id, uint32_t request_id,
+                         uint8_t type, uint8_t status, uint8_t func_id,
                          const uint8_t *payload, size_t payload_len);
 
 int rpc_unpack_header(const uint8_t *buffer, rpc_header_t *header);
@@ -151,13 +184,48 @@ int rpc_unpack_header(const uint8_t *buffer, rpc_header_t *header);
 
 /**
  * @brief Initialize and connect RPC channel to remote worker/router (used by client)
+ * @param channel Channel to initialize
+ * @param ip Remote IP address
+ * @param port Remote port
+ * @param channel_type Type of channel (SERVICE, DATA, or INGRESS)
+ * @param buffer_size Buffer size for RX/TX
  */
-int rpc_router_init(rpc_channel_t *channel, const char *ip, uint16_t port, size_t buffer_size);
+int rpc_client_connect(rpc_channel_t *channel, const char *ip, uint16_t port,
+                       rpc_channel_type_t channel_type, size_t buffer_size);
 
 /**
- * @brief Start RPC worker event loop (epoll-based)
- * Handles all incoming connections and dispatches to service handlers.
+ * @brief Start RPC worker event loop with dual channels (SERVICE + DATA)
+ * @param service_port Port for SERVICE channel
+ * @param data_port Port for DATA channel
+ * @param service_table Service handler table
  */
-int rpc_worker_run(uint16_t port, rpc_service_entry_t *service_table);
+int rpc_worker_run(uint16_t service_port, uint16_t data_port,
+                   rpc_service_entry_t *service_table);
+
+/**
+ * @brief Start RPC router event loop with three channels (SERVICE + DATA + INGRESS)
+ * @param service_port Port for SERVICE channel (worker management)
+ * @param data_port Port for DATA channel (worker communication)
+ * @param ingress_port Port for INGRESS channel (client requests)
+ * @param service_table Service handler table
+ */
+int rpc_router_run(uint16_t service_port, uint16_t data_port, uint16_t ingress_port,
+                   rpc_service_entry_t *service_table);
+
+/**
+ * @brief Initialize multi-channel listener
+ */
+int rpc_multi_listener_init(rpc_multi_channel_listener_t *listener);
+
+/**
+ * @brief Add a listener for a specific channel type
+ */
+int rpc_multi_listener_add(rpc_multi_channel_listener_t *listener,
+                           rpc_channel_type_t type, uint16_t port);
+
+/**
+ * @brief Destroy multi-channel listener
+ */
+void rpc_multi_listener_destroy(rpc_multi_channel_listener_t *listener);
 
 #endif // ROOLE_RPC_H

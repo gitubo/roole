@@ -19,14 +19,16 @@ static void signal_handler(int sig) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <router_id> <port>\n", argv[0]);
-        fprintf(stderr, "Example: %s 1 5000\n", argv[0]);
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s <router_id> <service_port> <data_port> <ingress_port>\n", argv[0]);
+        fprintf(stderr, "Example: %s 1 6000 6001 6002\n", argv[0]);
         return 1;
     }
-    
+
     node_id_t router_id = (node_id_t)atoi(argv[1]);
-    uint16_t port = (uint16_t)atoi(argv[2]);
+    uint16_t service_port = (uint16_t)atoi(argv[2]);
+    uint16_t data_port = (uint16_t)atoi(argv[3]);
+    uint16_t ingress_port = (uint16_t)atoi(argv[4]);
     
     // Setup signal handlers
     signal(SIGINT, signal_handler);
@@ -38,11 +40,13 @@ int main(int argc, char **argv) {
     ROOLE_LOG_INFO("========================================");
     ROOLE_LOG_INFO("Roole Router Starting");
     ROOLE_LOG_INFO("  Router ID: %u", router_id);
-    ROOLE_LOG_INFO("  Port: %u", port);
+    ROOLE_LOG_INFO("  SERVICE Port: %u", service_port);
+    ROOLE_LOG_INFO("  DATA Port: %u", data_port);
+    ROOLE_LOG_INFO("  INGRESS Port: %u", ingress_port);
     ROOLE_LOG_INFO("========================================");
-    
+
     // Initialize router
-    if (router_init(&g_router, router_id, port) != ROOLE_OK) {
+    if (router_init(&g_router, router_id, service_port, data_port, ingress_port) != ROOLE_OK) {
         ROOLE_LOG_ERROR("Failed to initialize router");
         return 1;
     }
@@ -90,12 +94,13 @@ int main(int argc, char **argv) {
     
     // Set RPC state and start RPC server (blocking)
     router_set_rpc_state(&g_router);
-    
+
     ROOLE_LOG_INFO("Router running. Press Ctrl+C to stop.");
-    ROOLE_LOG_INFO("Starting RPC server on port %u...", port);
-    
+    ROOLE_LOG_INFO("Starting RPC servers on SERVICE:%u, DATA:%u, INGRESS:%u...",
+                   service_port, data_port, ingress_port);
+
     // This blocks until shutdown
-    rpc_worker_run(port, router_rpc_service_table);
+    rpc_router_run(service_port, data_port, ingress_port, router_rpc_service_table);
     
     // Cleanup after RPC server stops
     router_shutdown(&g_router);

@@ -60,14 +60,14 @@ int main(int argc, char **argv) {
     ROOLE_LOG_INFO("  Message: %s", message);
     ROOLE_LOG_INFO("========================================\n");
     
-    // Connect to router
+    // Connect to router's INGRESS channel (for client requests)
     rpc_channel_t channel;
-    if (rpc_router_init(&channel, router_ip, router_port, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to connect to router");
+    if (rpc_client_connect(&channel, router_ip, router_port, RPC_CHANNEL_INGRESS, 4096) != 0) {
+        ROOLE_LOG_ERROR("Failed to connect to router INGRESS channel");
         return 1;
     }
-    
-    ROOLE_LOG_INFO("Connected to router\n");
+
+    ROOLE_LOG_INFO("Connected to router INGRESS channel\n");
     
     // ========================================================================
     // TEST 1: Submit Task

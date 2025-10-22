@@ -14,16 +14,20 @@
 // WORKER CALLBACKS
 // ============================================================================
 
-static void on_member_event(node_id_t node_id, node_type_t type, 
+static void on_member_event(node_id_t node_id, node_type_t type,
                            const char *ip, uint16_t port,
                            const char *event_type, void *user_data) {
     worker_state_t *worker = (worker_state_t*)user_data;
-    
+
     if (type == NODE_TYPE_ROUTER) {
         if (strcmp(event_type, MEMBER_EVENT_JOIN) == 0) {
-            worker_add_router(worker, node_id, ip, port);
+            // For multi-channel: assume router uses consecutive ports
+            // port = service_port, port+1 = data_port
+            uint16_t service_port = port;
+            uint16_t data_port = port + 1;
+            worker_add_router(worker, node_id, ip, service_port, data_port);
         }
-        else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 || 
+        else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 ||
                  strcmp(event_type, MEMBER_EVENT_LEAVE) == 0) {
             worker_remove_router(worker, node_id);
         }
@@ -141,15 +145,17 @@ static void* worker_heartbeat_thread_fn(void *arg) {
 // WORKER INITIALIZATION
 // ============================================================================
 
-int worker_init(worker_state_t *worker, node_id_t worker_id, uint16_t port, 
+int worker_init(worker_state_t *worker, node_id_t worker_id,
+               uint16_t service_port, uint16_t data_port,
                size_t num_executor_threads) {
     if (!worker || num_executor_threads == 0 || num_executor_threads > 16) {
         return ROOLE_ERR_INVALID;
     }
-    
+
     memset(worker, 0, sizeof(worker_state_t));
     worker->worker_id = worker_id;
-    worker->port = port;
+    worker->service_port = service_port;
+    worker->data_port = data_port;
     worker->num_executor_threads = num_executor_threads;
     worker->shutdown_flag = 0;
     worker->active_executions = 0;
@@ -188,9 +194,9 @@ int worker_init(worker_state_t *worker, node_id_t worker_id, uint16_t port,
     // Initialize membership
     char bind_addr[32];
     snprintf(bind_addr, sizeof(bind_addr), "0.0.0.0");
-    
-    if (membership_init(&worker->membership, worker_id, NODE_TYPE_WORKER, 
-                       bind_addr, port + 1000) != ROOLE_OK) {
+
+    if (membership_init(&worker->membership, worker_id, NODE_TYPE_WORKER,
+                       bind_addr, service_port + 1000) != ROOLE_OK) {
         ROOLE_LOG_ERROR("Failed to initialize membership");
         pthread_mutex_destroy(&worker->routers_lock);
         cluster_view_destroy(&worker->cluster_view);
@@ -198,11 +204,11 @@ int worker_init(worker_state_t *worker, node_id_t worker_id, uint16_t port,
         dag_catalog_destroy(&worker->dag_catalog);
         return ROOLE_ERR_INVALID;
     }
-    
+
     membership_set_callback(worker->membership, on_member_event, worker);
-    
-    ROOLE_LOG_INFO("Worker %u initialized on port %u (%zu executor threads)", 
-                   worker_id, port, num_executor_threads);
+
+    ROOLE_LOG_INFO("Worker %u initialized (SERVICE:%u, DATA:%u, %zu executor threads)",
+                   worker_id, service_port, data_port, num_executor_threads);
     return ROOLE_OK;
 }
 
@@ -301,11 +307,11 @@ int worker_enqueue_task(worker_state_t *worker, execution_id_t exec_id,
 // ============================================================================
 
 int worker_add_router(worker_state_t *worker, node_id_t router_id,
-                     const char *ip, uint16_t port) {
+                     const char *ip, uint16_t service_port, uint16_t data_port) {
     if (!worker || !ip) return ROOLE_ERR_INVALID;
-    
+
     pthread_mutex_lock(&worker->routers_lock);
-    
+
     // Check if already exists
     for (size_t i = 0; i < worker->router_count; i++) {
         if (worker->routers[i].active && worker->routers[i].router_id == router_id) {
@@ -314,7 +320,7 @@ int worker_add_router(worker_state_t *worker, node_id_t router_id,
             return ROOLE_OK;
         }
     }
-    
+
     // Find free slot
     size_t slot = SIZE_MAX;
     for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
@@ -323,71 +329,99 @@ int worker_add_router(worker_state_t *worker, node_id_t router_id,
             break;
         }
     }
-    
+
     if (slot == SIZE_MAX) {
         pthread_mutex_unlock(&worker->routers_lock);
         ROOLE_LOG_ERROR("Maximum router connections reached");
         return ROOLE_ERR_FULL;
     }
-    
+
     router_connection_t *conn = &worker->routers[slot];
     memset(conn, 0, sizeof(router_connection_t));
-    
+
     conn->router_id = router_id;
     roole_strncpy_safe(conn->ip, ip, MAX_IP_LEN);
-    conn->port = port;
+    conn->service_port = service_port;
+    conn->data_port = data_port;
     conn->last_sync_ms = roole_time_now_ms();
     conn->active = 1;
-    
-    // Initialize RPC channel to router
-    conn->rpc_channel = roole_malloc(sizeof(rpc_channel_t));
-    if (!conn->rpc_channel) {
-        ROOLE_LOG_ERROR("Failed to allocate RPC channel");
+
+    // Initialize RPC channels to router (SERVICE and DATA)
+    conn->service_channel = roole_malloc(sizeof(rpc_channel_t));
+    conn->data_channel = roole_malloc(sizeof(rpc_channel_t));
+
+    if (!conn->service_channel || !conn->data_channel) {
+        ROOLE_LOG_ERROR("Failed to allocate RPC channels");
+        if (conn->service_channel) roole_free(conn->service_channel);
+        if (conn->data_channel) roole_free(conn->data_channel);
         pthread_mutex_unlock(&worker->routers_lock);
         return ROOLE_ERR_NOMEM;
     }
-    
-    if (rpc_router_init(conn->rpc_channel, ip, port, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to initialize RPC channel to router %u", router_id);
-        roole_free(conn->rpc_channel);
-        conn->rpc_channel = NULL;
+
+    // Connect SERVICE channel
+    if (rpc_client_connect(conn->service_channel, ip, service_port,
+                          RPC_CHANNEL_SERVICE, 4096) != 0) {
+        ROOLE_LOG_ERROR("Failed to connect SERVICE channel to router %u", router_id);
+        roole_free(conn->service_channel);
+        roole_free(conn->data_channel);
+        conn->service_channel = NULL;
+        conn->data_channel = NULL;
         conn->active = 0;
         pthread_mutex_unlock(&worker->routers_lock);
         return ROOLE_ERR_NETWORK;
     }
-    
+
+    // Connect DATA channel
+    if (rpc_client_connect(conn->data_channel, ip, data_port,
+                          RPC_CHANNEL_DATA, 4096) != 0) {
+        ROOLE_LOG_ERROR("Failed to connect DATA channel to router %u", router_id);
+        rpc_channel_destroy(conn->service_channel);
+        roole_free(conn->service_channel);
+        roole_free(conn->data_channel);
+        conn->service_channel = NULL;
+        conn->data_channel = NULL;
+        conn->active = 0;
+        pthread_mutex_unlock(&worker->routers_lock);
+        return ROOLE_ERR_NETWORK;
+    }
+
     if (slot >= worker->router_count) {
         worker->router_count = slot + 1;
     }
-    
+
     pthread_mutex_unlock(&worker->routers_lock);
-    
-    ROOLE_LOG_INFO("Connected to router %u (%s:%u)", router_id, ip, port);
-    
+
+    ROOLE_LOG_INFO("Connected to router %u (%s SERVICE:%u DATA:%u)",
+                   router_id, ip, service_port, data_port);
+
     return ROOLE_OK;
 }
 
 int worker_remove_router(worker_state_t *worker, node_id_t router_id) {
     if (!worker) return ROOLE_ERR_INVALID;
-    
+
     pthread_mutex_lock(&worker->routers_lock);
-    
+
     for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
         if (worker->routers[i].active && worker->routers[i].router_id == router_id) {
-            // Close RPC channel
-            if (worker->routers[i].rpc_channel) {
-                rpc_channel_destroy(worker->routers[i].rpc_channel);
-                roole_free(worker->routers[i].rpc_channel);
+            // Close RPC channels (both service and data)
+            if (worker->routers[i].service_channel) {
+                rpc_channel_destroy(worker->routers[i].service_channel);
+                roole_free(worker->routers[i].service_channel);
             }
-            
+            if (worker->routers[i].data_channel) {
+                rpc_channel_destroy(worker->routers[i].data_channel);
+                roole_free(worker->routers[i].data_channel);
+            }
+
             worker->routers[i].active = 0;
-            
+
             pthread_mutex_unlock(&worker->routers_lock);
             ROOLE_LOG_INFO("Disconnected from router %u", router_id);
             return ROOLE_OK;
         }
     }
-    
+
     pthread_mutex_unlock(&worker->routers_lock);
     return ROOLE_ERR_NOTFOUND;
 }
@@ -418,10 +452,10 @@ int worker_send_heartbeat(worker_state_t *worker) {
             memcpy(payload, &worker->worker_id, sizeof(node_id_t));
             memcpy(payload + sizeof(node_id_t), &active, sizeof(uint32_t));
             memcpy(payload + sizeof(node_id_t) + 4, &load, sizeof(float));
-            
-            // Pack and send registration message
+
+            // Pack and send heartbeat message via SERVICE channel
             size_t msg_len = rpc_pack_message(
-                worker->routers[i].rpc_channel->tx_buffer,
+                worker->routers[i].service_channel->tx_buffer,
                 worker->worker_id,
                 0,
                 RPC_TYPE_REQUEST,
@@ -430,8 +464,9 @@ int worker_send_heartbeat(worker_state_t *worker) {
                 payload,
                 16
             );
-            
-            if (send(worker->routers[i].rpc_channel->socket_fd, worker->routers[i].rpc_channel->tx_buffer, msg_len, 0) <= 0) {
+
+            if (send(worker->routers[i].service_channel->socket_fd,
+                    worker->routers[i].service_channel->tx_buffer, msg_len, 0) <= 0) {
                 ROOLE_LOG_ERROR("Failed to send heartbeat");
                 return ROOLE_ERR_NETWORK;
             }
@@ -443,22 +478,26 @@ int worker_send_heartbeat(worker_state_t *worker) {
     return ROOLE_OK;
 }
 
-int worker_register_with_router(worker_state_t *worker, const char *router_ip, uint16_t router_port) {
+int worker_register_with_router(worker_state_t *worker, const char *router_ip,
+                                uint16_t service_port, uint16_t data_port) {
     if (!worker || !router_ip) return ROOLE_ERR_INVALID;
-    
-    ROOLE_LOG_INFO("Registering with router at %s:%u", router_ip, router_port);
-    
-    // Connect to router
+
+    ROOLE_LOG_INFO("Registering with router at %s (SERVICE:%u DATA:%u)",
+                   router_ip, service_port, data_port);
+
+    // Connect to router's SERVICE channel for registration
     rpc_channel_t channel;
-    if (rpc_router_init(&channel, router_ip, router_port, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to connect to router for registration");
+    if (rpc_client_connect(&channel, router_ip, service_port,
+                          RPC_CHANNEL_SERVICE, 4096) != 0) {
+        ROOLE_LOG_ERROR("Failed to connect to router SERVICE channel for registration");
         return ROOLE_ERR_NETWORK;
     }
-    
-    // Build registration payload: [worker_id][worker_port]
-    uint8_t payload[4];
+
+    // Build registration payload: [worker_id][service_port][data_port]
+    uint8_t payload[6];
     memcpy(payload, &worker->worker_id, sizeof(node_id_t));
-    memcpy(payload + sizeof(node_id_t), &worker->port, sizeof(uint16_t));
+    memcpy(payload + sizeof(node_id_t), &worker->service_port, sizeof(uint16_t));
+    memcpy(payload + sizeof(node_id_t) + 2, &worker->data_port, sizeof(uint16_t));
     
     // Pack and send registration message
     size_t msg_len = rpc_pack_message(
@@ -466,10 +505,10 @@ int worker_register_with_router(worker_state_t *worker, const char *router_ip, u
         worker->worker_id,
         1,  // request_id
         RPC_TYPE_REQUEST,
-        RPC_STATUS_UNKNOWN, 
+        RPC_STATUS_UNKNOWN,
         FUNC_ID_WORKER_REGISTRATION,
         payload,
-        4
+        6
     );
     
     if (send(channel.socket_fd, channel.tx_buffer, msg_len, 0) <= 0) {
@@ -490,10 +529,10 @@ int worker_register_with_router(worker_state_t *worker, const char *router_ip, u
     
     if (resp_header.type_and_status.fields.status == RPC_STATUS_SUCCESS) {
         ROOLE_LOG_INFO("Successfully registered with router");
-        
-        // Add router to connections
-        worker_add_router(worker, 1, router_ip, router_port);
-        
+
+        // Add router to connections (using the same ports we just connected to)
+        worker_add_router(worker, 1, router_ip, service_port, data_port);
+
         rpc_channel_destroy(&channel);
         return ROOLE_OK;
     }

@@ -20,12 +20,16 @@ typedef struct router_state router_state_t;
 typedef struct worker_info {
     node_id_t worker_id;
     char ip[MAX_IP_LEN];
-    uint16_t port;
+    uint16_t service_port;  // Port for SERVICE channel
+    uint16_t data_port;     // Port for DATA channel
     node_status_t status;
     uint32_t active_executions;
     float load_score;  // For load balancing (0.0 = idle, 1.0 = fully loaded)
     uint64_t last_heartbeat_ms;
-    rpc_channel_t *rpc_channel;
+
+    // Separate RPC channels for service and data communication
+    rpc_channel_t *service_channel;  // For heartbeat, registration, catalog sync
+    rpc_channel_t *data_channel;     // For message processing, execution updates
 } worker_info_t;
 
 typedef struct worker_pool {
@@ -38,7 +42,8 @@ typedef struct worker_pool {
 int worker_pool_init(worker_pool_t *pool, size_t capacity);
 void worker_pool_destroy(worker_pool_t *pool);
 
-int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip, uint16_t port);
+int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
+                    uint16_t service_port, uint16_t data_port);
 int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id);
 int worker_pool_update_status(worker_pool_t *pool, node_id_t worker_id, node_status_t status);
 int worker_pool_update_load(worker_pool_t *pool, node_id_t worker_id, 
@@ -137,30 +142,32 @@ size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker);
 
 typedef struct router_state {
     node_id_t router_id;
-    uint16_t port;
-    
+    uint16_t service_port;   // Port for SERVICE channel (worker management)
+    uint16_t data_port;      // Port for DATA channel (worker communication)
+    uint16_t ingress_port;   // Port for INGRESS channel (client requests)
+
     // DAG catalog (replicated via Raft consensus)
     dag_catalog_t dag_catalog;
-    
+
     // Worker management
     worker_pool_t worker_pool;
     execution_tracker_t exec_tracker;
-    
+
     // Cluster membership
     cluster_view_t cluster_view;
     membership_handle_t *membership;
-    
+
     // Heartbeat tracking for workers
     heartbeat_tracker_t *heartbeat_tracker;
-    
+
     // Consensus (for DAG catalog sync - optional, placeholder for Raft)
     // raft_handle_t *raft;
-    
+
     // Background threads
     pthread_t heartbeat_thread;
     pthread_t recovery_thread;
     pthread_t cleanup_thread;
-    
+
     int shutdown_flag;
 } router_state_t;
 
@@ -169,7 +176,8 @@ typedef struct router_state {
 // ============================================================================
 
 // Initialization
-int router_init(router_state_t *router, node_id_t router_id, uint16_t port);
+int router_init(router_state_t *router, node_id_t router_id,
+               uint16_t service_port, uint16_t data_port, uint16_t ingress_port);
 int router_start(router_state_t *router);
 void router_shutdown(router_state_t *router);
 
@@ -188,8 +196,8 @@ int router_get_execution_status(router_state_t *router, execution_id_t exec_id,
                                execution_status_t *out_status);
 
 // Worker management (called by membership callbacks)
-int router_on_worker_join(router_state_t *router, node_id_t worker_id, 
-                         const char *ip, uint16_t port);
+int router_on_worker_join(router_state_t *router, node_id_t worker_id,
+                         const char *ip, uint16_t service_port, uint16_t data_port);
 int router_on_worker_failed(router_state_t *router, node_id_t worker_id);
 
 // Worker heartbeat/status update (called by RPC handlers)

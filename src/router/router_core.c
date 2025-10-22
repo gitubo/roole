@@ -13,16 +13,20 @@
 // ROUTER CALLBACKS
 // ============================================================================
 
-static void on_member_event(node_id_t node_id, node_type_t type, 
+static void on_member_event(node_id_t node_id, node_type_t type,
                            const char *ip, uint16_t port,
                            const char *event_type, void *user_data) {
     router_state_t *router = (router_state_t*)user_data;
-    
+
     if (type == NODE_TYPE_WORKER) {
         if (strcmp(event_type, MEMBER_EVENT_JOIN) == 0) {
-            router_on_worker_join(router, node_id, ip, port);
+            // For multi-channel: assume worker uses consecutive ports
+            // port = service_port, port+1 = data_port
+            uint16_t service_port = port;
+            uint16_t data_port = port + 1;
+            router_on_worker_join(router, node_id, ip, service_port, data_port);
         }
-        else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 || 
+        else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 ||
                  strcmp(event_type, MEMBER_EVENT_LEAVE) == 0) {
             router_on_worker_failed(router, node_id);
         }
@@ -82,12 +86,15 @@ static void* router_cleanup_thread_fn(void *arg) {
 // ROUTER INITIALIZATION
 // ============================================================================
 
-int router_init(router_state_t *router, node_id_t router_id, uint16_t port) {
+int router_init(router_state_t *router, node_id_t router_id,
+               uint16_t service_port, uint16_t data_port, uint16_t ingress_port) {
     if (!router) return ROOLE_ERR_INVALID;
-    
+
     memset(router, 0, sizeof(router_state_t));
     router->router_id = router_id;
-    router->port = port;
+    router->service_port = service_port;
+    router->data_port = data_port;
+    router->ingress_port = ingress_port;
     router->shutdown_flag = 0;
     
     // Initialize DAG catalog
@@ -139,9 +146,9 @@ int router_init(router_state_t *router, node_id_t router_id, uint16_t port) {
     // Initialize membership (gossip)
     char bind_addr[32];
     snprintf(bind_addr, sizeof(bind_addr), "0.0.0.0");
-    
-    if (membership_init(&router->membership, router_id, NODE_TYPE_ROUTER, 
-                       bind_addr, port + 1000) != ROOLE_OK) {
+
+    if (membership_init(&router->membership, router_id, NODE_TYPE_ROUTER,
+                       bind_addr, service_port + 1000) != ROOLE_OK) {
         ROOLE_LOG_ERROR("Failed to initialize membership");
         heartbeat_tracker_destroy(router->heartbeat_tracker);
         cluster_view_destroy(&router->cluster_view);
@@ -150,10 +157,11 @@ int router_init(router_state_t *router, node_id_t router_id, uint16_t port) {
         dag_catalog_destroy(&router->dag_catalog);
         return ROOLE_ERR_INVALID;
     }
-    
+
     membership_set_callback(router->membership, on_member_event, router);
-    
-    ROOLE_LOG_INFO("Router %u initialized on port %u", router_id, port);
+
+    ROOLE_LOG_INFO("Router %u initialized (SERVICE:%u, DATA:%u, INGRESS:%u)",
+                   router_id, service_port, data_port, ingress_port);
     return ROOLE_OK;
 }
 
@@ -336,19 +344,20 @@ int router_get_execution_status(router_state_t *router, execution_id_t exec_id,
 // WORKER MANAGEMENT
 // ============================================================================
 
-int router_on_worker_join(router_state_t *router, node_id_t worker_id, 
-                         const char *ip, uint16_t port) {
+int router_on_worker_join(router_state_t *router, node_id_t worker_id,
+                         const char *ip, uint16_t service_port, uint16_t data_port) {
     if (!router || !ip) return ROOLE_ERR_INVALID;
-    
-    ROOLE_LOG_INFO("Worker %u joined (%s:%u)", worker_id, ip, port);
-    
+
+    ROOLE_LOG_INFO("Worker %u joined (%s SERVICE:%u DATA:%u)",
+                   worker_id, ip, service_port, data_port);
+
     // Add to worker pool
-    worker_pool_add(&router->worker_pool, worker_id, ip, port);
-    
+    worker_pool_add(&router->worker_pool, worker_id, ip, service_port, data_port);
+
     // Start tracking heartbeats
     heartbeat_tracker_add_node(router->heartbeat_tracker, worker_id);
-    
-    // TODO: Establish RPC channel
+
+    // TODO: Establish RPC channels (service and data)
     // TODO: Send current DAG catalog to worker
     
     return ROOLE_OK;

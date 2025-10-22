@@ -45,17 +45,54 @@ static double time_diff_us(const struct timespec *start, const struct timespec *
 }
 
 // ============================================================================
+// CHANNEL TYPE MAPPING
+// ============================================================================
+
+rpc_channel_type_t rpc_get_channel_for_func(uint8_t func_id) {
+    // SERVICE channel: heartbeat, registration, catalog sync, cluster management
+    if (func_id == FUNC_ID_WORKER_HEARTBEAT ||
+        func_id == FUNC_ID_WORKER_REGISTRATION ||
+        func_id == FUNC_ID_SYNC_CATALOG ||
+        func_id == FUNC_ID_JOIN_CLUSTER ||
+        func_id == FUNC_ID_NODE_LIST ||
+        func_id == FUNC_ID_HEARTBEAT ||
+        func_id == FUNC_ID_GOSSIP ||
+        func_id == FUNC_ID_LEAVE_CLUSTER) {
+        return RPC_CHANNEL_SERVICE;
+    }
+
+    // DATA channel: message processing, execution updates
+    if (func_id == FUNC_ID_EXECUTE_DAG ||
+        func_id == FUNC_ID_EXECUTION_UPDATE) {
+        return RPC_CHANNEL_DATA;
+    }
+
+    // INGRESS channel: DAG management from external clients
+    if (func_id == FUNC_ID_ADD_DAG ||
+        func_id == FUNC_ID_UPDATE_DAG ||
+        func_id == FUNC_ID_REMOVE_DAG ||
+        func_id == FUNC_ID_GET_DAG ||
+        func_id == FUNC_ID_LIST_DAGS) {
+        return RPC_CHANNEL_INGRESS;
+    }
+
+    // Default to SERVICE for unknown functions
+    return RPC_CHANNEL_SERVICE;
+}
+
+// ============================================================================
 // CHANNEL MANAGEMENT
 // ============================================================================
 
-int rpc_channel_init(rpc_channel_t *channel, int fd, size_t buffer_size) {
+int rpc_channel_init(rpc_channel_t *channel, int fd, rpc_channel_type_t type, size_t buffer_size) {
     if (buffer_size == 0) return -1;
-    
+
     channel->socket_fd = fd;
+    channel->channel_type = type;
     channel->rx_buffer_size = buffer_size;
     channel->tx_buffer_size = buffer_size;
     channel->rx_data_len = 0;
-    
+
     channel->rx_buffer = (uint8_t *)malloc(buffer_size);
     channel->tx_buffer = (uint8_t *)malloc(buffer_size);
 
@@ -64,7 +101,7 @@ int rpc_channel_init(rpc_channel_t *channel, int fd, size_t buffer_size) {
         if (channel->tx_buffer) free(channel->tx_buffer);
         return -1;
     }
-    
+
     return 0;
 }
 
@@ -121,30 +158,46 @@ int rpc_unpack_header(const uint8_t *buffer, rpc_header_t *header) {
     header->total_len = ntohl(net_total_len);
     header->request_id = ntohl(net_request_id);
     
-    header->type_and_status.byte = buffer[8];
-    header->func_id = buffer[9];
+    // Extract sender_id (uint16_t at offset 8-9)
+    memcpy(&header->sender_id, buffer + 8, sizeof(node_id_t));
+    
+    // Extract type_and_status at offset 10
+    header->type_and_status.byte = buffer[10];
+    
+    // Extract func_id at offset 11
+    header->func_id = buffer[11];
 
     if (header->total_len < RPC_HEADER_SIZE) return -1;
-    
+
+/*    ROOLE_LOG_INFO("header:\n\tlength: %d\n\trequest_id: %d\n\tsender_id: %d\n\ttype: %d\n\tstatus: %d\n\tfunc_id: %d", 
+                    header->total_len,
+                    header->request_id,
+                    header->sender_id,
+                    header->type_and_status,
+                    header->type_and_status,
+                    header->func_id
+                    );
+  */  
     return 0;
 }
 
 // ============================================================================
-// ROUTER/CLIENT INITIALIZATION
+// CLIENT CONNECTION (replaces old rpc_router_init)
 // ============================================================================
 
-int rpc_router_init(rpc_channel_t *channel, const char *ip, uint16_t port, size_t buffer_size) {
+int rpc_client_connect(rpc_channel_t *channel, const char *ip, uint16_t port,
+                       rpc_channel_type_t channel_type, size_t buffer_size) {
     int client_fd;
     struct sockaddr_in server_addr;
 
     client_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_fd == -1) { 
-        ROOLE_LOG_ERROR("rpc_router_init: socket failed");
-        return -1; 
+    if (client_fd == -1) {
+        ROOLE_LOG_ERROR("rpc_client_connect: socket failed");
+        return -1;
     }
-    
-    if (rpc_channel_init(channel, client_fd, buffer_size) != 0) {
-        ROOLE_LOG_ERROR("rpc_router_init: Failed to initialize RPC channel buffers");
+
+    if (rpc_channel_init(channel, client_fd, channel_type, buffer_size) != 0) {
+        ROOLE_LOG_ERROR("rpc_client_connect: Failed to initialize RPC channel buffers");
         close(client_fd);
         return -1;
     }
@@ -152,21 +205,134 @@ int rpc_router_init(rpc_channel_t *channel, const char *ip, uint16_t port, size_
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    
+
     if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
-        ROOLE_LOG_ERROR("rpc_router_init: inet_pton failed");
+        ROOLE_LOG_ERROR("rpc_client_connect: inet_pton failed");
         rpc_channel_destroy(channel);
         return -1;
     }
 
     if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
-        ROOLE_LOG_ERROR("rpc_router_init: connect failed");
+        ROOLE_LOG_ERROR("rpc_client_connect: connect failed");
         rpc_channel_destroy(channel);
         return -1;
     }
 
-    ROOLE_LOG_INFO("RPC client connected to %s:%u", ip, port);
+    const char *channel_name = (channel_type == RPC_CHANNEL_SERVICE) ? "SERVICE" :
+                               (channel_type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
+    ROOLE_LOG_INFO("RPC client connected to %s:%u (channel: %s)", ip, port, channel_name);
     return 0;
+}
+
+// ============================================================================
+// MULTI-CHANNEL LISTENER
+// ============================================================================
+
+static int make_socket_non_blocking(int fd);  // Forward declaration
+
+int rpc_multi_listener_init(rpc_multi_channel_listener_t *listener) {
+    if (!listener) return -1;
+
+    listener->count = 0;
+    listener->epoll_fd = epoll_create1(0);
+    if (listener->epoll_fd == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_init: epoll_create1 failed");
+        return -1;
+    }
+
+    for (size_t i = 0; i < MAX_CHANNEL_TYPES; i++) {
+        listener->listeners[i].listener_fd = -1;
+        listener->listeners[i].port = 0;
+    }
+
+    return 0;
+}
+
+int rpc_multi_listener_add(rpc_multi_channel_listener_t *listener,
+                           rpc_channel_type_t type, uint16_t port) {
+    if (!listener || listener->count >= MAX_CHANNEL_TYPES) return -1;
+
+    int listener_fd;
+    struct sockaddr_in server_addr;
+    struct epoll_event event;
+
+    // Create socket
+    listener_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener_fd == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_add: socket failed for port %u", port);
+        return -1;
+    }
+
+    // Set SO_REUSEADDR
+    int opt = 1;
+    if (setsockopt(listener_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_add: setsockopt failed");
+        close(listener_fd);
+        return -1;
+    }
+
+    // Set non-blocking
+    if (make_socket_non_blocking(listener_fd) == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_add: make_socket_non_blocking failed");
+        close(listener_fd);
+        return -1;
+    }
+
+    // Bind
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(port);
+
+    if (bind(listener_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_add: bind failed for port %u", port);
+        close(listener_fd);
+        return -1;
+    }
+
+    // Listen
+    if (listen(listener_fd, BACKLOG) == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_add: listen failed");
+        close(listener_fd);
+        return -1;
+    }
+
+    // Add to epoll
+    event.events = EPOLLIN | EPOLLET;
+    event.data.fd = listener_fd;
+    if (epoll_ctl(listener->epoll_fd, EPOLL_CTL_ADD, listener_fd, &event) == -1) {
+        ROOLE_LOG_ERROR("rpc_multi_listener_add: epoll_ctl failed");
+        close(listener_fd);
+        return -1;
+    }
+
+    // Store listener info
+    listener->listeners[listener->count].listener_fd = listener_fd;
+    listener->listeners[listener->count].channel_type = type;
+    listener->listeners[listener->count].port = port;
+    listener->count++;
+
+    const char *channel_name = (type == RPC_CHANNEL_SERVICE) ? "SERVICE" :
+                               (type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
+    ROOLE_LOG_INFO("[RPC] Listening on port %u for %s channel", port, channel_name);
+
+    return 0;
+}
+
+void rpc_multi_listener_destroy(rpc_multi_channel_listener_t *listener) {
+    if (!listener) return;
+
+    for (size_t i = 0; i < listener->count; i++) {
+        if (listener->listeners[i].listener_fd != -1) {
+            close(listener->listeners[i].listener_fd);
+            listener->listeners[i].listener_fd = -1;
+        }
+    }
+
+    if (listener->epoll_fd != -1) {
+        close(listener->epoll_fd);
+        listener->epoll_fd = -1;
+    }
 }
 
 // ============================================================================
@@ -332,113 +498,71 @@ static void process_buffered_data(rpc_channel_t *channel) {
 }
 
 // ============================================================================
-// WORKER EVENT LOOP (epoll-based)
+// MULTI-CHANNEL EVENT LOOP (Generic - used by both worker and router)
 // ============================================================================
 
-int rpc_worker_run(uint16_t port, rpc_service_entry_t *service_table) {
-    int listener_fd, epoll_fd;
-    struct sockaddr_in server_addr;
+static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
+                                        rpc_service_entry_t *service_table) {
     struct epoll_event event, events[MAX_EVENTS];
 
     g_service_table = service_table;
 
-    // Setup listener socket
-    listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener_fd == -1) { 
-        ROOLE_LOG_ERROR("rpc_worker_run: socket failed");
-        return -1; 
-    }
-    
-    int opt = 1;
-    if (setsockopt(listener_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) { 
-        ROOLE_LOG_ERROR("setsockopt failed");
-        close(listener_fd); 
-        return -1; 
-    }
-    
-    if (make_socket_non_blocking(listener_fd) == -1) { 
-        ROOLE_LOG_ERROR("non-blocking failed");
-        close(listener_fd); 
-        return -1; 
-    }
-    
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_addr.sin_port = htons(port);
-    
-    if (bind(listener_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) { 
-        ROOLE_LOG_ERROR("bind failed");
-        close(listener_fd); 
-        return -1; 
-    }
-    
-    if (listen(listener_fd, BACKLOG) == -1) { 
-        ROOLE_LOG_ERROR("listen failed");
-        close(listener_fd); 
-        return -1; 
-    }
-
-    ROOLE_LOG_INFO("[RPC] Worker listening on port %u", port);
-
-    // Initialize epoll
-    epoll_fd = epoll_create1(0);
-    if (epoll_fd == -1) { 
-        ROOLE_LOG_ERROR("epoll_create1 failed");
-        close(listener_fd); 
-        return -1; 
-    }
-
-    event.events = EPOLLIN | EPOLLET;
-    event.data.fd = listener_fd;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener_fd, &event) == -1) { 
-        ROOLE_LOG_ERROR("epoll_ctl listener failed");
-        close(listener_fd); 
-        close(epoll_fd); 
-        return -1; 
-    }
-
     // Main event loop
     while (1) {
-        int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-        if (n == -1) { 
-            if (errno == EINTR) continue; 
+        int n = epoll_wait(listener->epoll_fd, events, MAX_EVENTS, -1);
+        if (n == -1) {
+            if (errno == EINTR) continue;
             ROOLE_LOG_ERROR("epoll_wait failed");
-            break; 
+            break;
         }
 
         for (int i = 0; i < n; i++) {
-            if (events[i].data.fd == listener_fd) {
-                // New connection
+            int is_listener = 0;
+            rpc_channel_type_t listener_type = RPC_CHANNEL_SERVICE;
+
+            // Check if this is a listener socket
+            for (size_t j = 0; j < listener->count; j++) {
+                if (events[i].data.fd == listener->listeners[j].listener_fd) {
+                    is_listener = 1;
+                    listener_type = listener->listeners[j].channel_type;
+                    break;
+                }
+            }
+
+            if (is_listener) {
+                // New connection on one of the listener sockets
+                int listener_fd = events[i].data.fd;
                 struct sockaddr_in client_addr;
                 socklen_t client_len = sizeof(client_addr);
                 int client_fd;
-                
+
                 while ((client_fd = accept(listener_fd, (struct sockaddr *)&client_addr, &client_len)) != -1) {
-                    
-                    if (make_socket_non_blocking(client_fd) == -1) { 
-                        close(client_fd); 
-                        continue; 
+
+                    if (make_socket_non_blocking(client_fd) == -1) {
+                        close(client_fd);
+                        continue;
                     }
 
                     rpc_channel_t *channel = (rpc_channel_t *)malloc(sizeof(rpc_channel_t));
-                    if (!channel || rpc_channel_init(channel, client_fd, MAX_BUFFER_SIZE) != 0) {
+                    if (!channel || rpc_channel_init(channel, client_fd, listener_type, MAX_BUFFER_SIZE) != 0) {
                         if (channel) free(channel);
-                        close(client_fd); 
+                        close(client_fd);
                         continue;
                     }
 
                     event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
-                    event.data.ptr = channel; 
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
-                        rpc_channel_destroy(channel); 
-                        free(channel); 
+                    event.data.ptr = channel;
+                    if (epoll_ctl(listener->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+                        rpc_channel_destroy(channel);
+                        free(channel);
                         continue;
                     }
-                    
-                    ROOLE_LOG_DEBUG("[RPC] New connection (FD %d)", client_fd);
+
+                    const char *channel_name = (listener_type == RPC_CHANNEL_SERVICE) ? "SERVICE" :
+                                               (listener_type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
+                    ROOLE_LOG_DEBUG("[RPC] New connection on %s channel (FD %d)", channel_name, client_fd);
                 }
-                
+
                 if (client_fd == -1 && errno != EWOULDBLOCK && errno != EAGAIN) {
                     ROOLE_LOG_ERROR("accept error");
                 }
@@ -452,29 +576,29 @@ int rpc_worker_run(uint16_t port, rpc_service_entry_t *service_table) {
                     ROOLE_LOG_DEBUG("[RPC] Connection closed on FD %d", client_fd);
                     close_connection = 1;
                 }
-                
+
                 if (events[i].events & EPOLLIN) {
                     ssize_t bytes_read;
-                    
+
                     // Read until EAGAIN/EWOULDBLOCK
                     while (channel->rx_data_len < channel->rx_buffer_size) {
-                        bytes_read = read(client_fd, channel->rx_buffer + channel->rx_data_len, 
+                        bytes_read = read(client_fd, channel->rx_buffer + channel->rx_data_len,
                                         channel->rx_buffer_size - channel->rx_data_len);
-                        
+
                         if (bytes_read > 0) {
                             channel->rx_data_len += bytes_read;
                         }
-                        else if (bytes_read == 0) { 
+                        else if (bytes_read == 0) {
                             ROOLE_LOG_DEBUG("[RPC] Client FD %d closed gracefully", client_fd);
-                            close_connection = 1; 
-                            break; 
+                            close_connection = 1;
+                            break;
                         }
                         else if (bytes_read == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
                             break;
                         }
-                        else { 
-                            close_connection = 1; 
-                            break; 
+                        else {
+                            close_connection = 1;
+                            break;
                         }
                     }
 
@@ -487,9 +611,9 @@ int rpc_worker_run(uint16_t port, rpc_service_entry_t *service_table) {
                         close_connection = 1;
                     }
                 }
-                
+
                 if (close_connection) {
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+                    epoll_ctl(listener->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
                     // TODO: Close all pending contexts for this channel
                     rpc_channel_destroy(channel);
                     free(channel);
@@ -498,7 +622,79 @@ int rpc_worker_run(uint16_t port, rpc_service_entry_t *service_table) {
         }
     }
 
-    close(listener_fd);
-    close(epoll_fd);
     return -1;
+}
+
+// ============================================================================
+// WORKER EVENT LOOP (Two channels: SERVICE + DATA)
+// ============================================================================
+
+int rpc_worker_run(uint16_t service_port, uint16_t data_port,
+                   rpc_service_entry_t *service_table) {
+    rpc_multi_channel_listener_t listener;
+
+    ROOLE_LOG_INFO("[RPC] Worker starting with SERVICE port %u, DATA port %u",
+                   service_port, data_port);
+
+    if (rpc_multi_listener_init(&listener) != 0) {
+        ROOLE_LOG_ERROR("Failed to initialize multi-channel listener");
+        return -1;
+    }
+
+    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_SERVICE, service_port) != 0) {
+        ROOLE_LOG_ERROR("Failed to add SERVICE listener");
+        rpc_multi_listener_destroy(&listener);
+        return -1;
+    }
+
+    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_DATA, data_port) != 0) {
+        ROOLE_LOG_ERROR("Failed to add DATA listener");
+        rpc_multi_listener_destroy(&listener);
+        return -1;
+    }
+
+    int result = rpc_multi_channel_event_loop(&listener, service_table);
+
+    rpc_multi_listener_destroy(&listener);
+    return result;
+}
+
+// ============================================================================
+// ROUTER EVENT LOOP (Three channels: SERVICE + DATA + INGRESS)
+// ============================================================================
+
+int rpc_router_run(uint16_t service_port, uint16_t data_port, uint16_t ingress_port,
+                   rpc_service_entry_t *service_table) {
+    rpc_multi_channel_listener_t listener;
+
+    ROOLE_LOG_INFO("[RPC] Router starting with SERVICE port %u, DATA port %u, INGRESS port %u",
+                   service_port, data_port, ingress_port);
+
+    if (rpc_multi_listener_init(&listener) != 0) {
+        ROOLE_LOG_ERROR("Failed to initialize multi-channel listener");
+        return -1;
+    }
+
+    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_SERVICE, service_port) != 0) {
+        ROOLE_LOG_ERROR("Failed to add SERVICE listener");
+        rpc_multi_listener_destroy(&listener);
+        return -1;
+    }
+
+    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_DATA, data_port) != 0) {
+        ROOLE_LOG_ERROR("Failed to add DATA listener");
+        rpc_multi_listener_destroy(&listener);
+        return -1;
+    }
+
+    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_INGRESS, ingress_port) != 0) {
+        ROOLE_LOG_ERROR("Failed to add INGRESS listener");
+        rpc_multi_listener_destroy(&listener);
+        return -1;
+    }
+
+    int result = rpc_multi_channel_event_loop(&listener, service_table);
+
+    rpc_multi_listener_destroy(&listener);
+    return result;
 }

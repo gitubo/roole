@@ -195,29 +195,32 @@ static int handle_list_dags(rpc_async_context_t *context,
 
 /**
  * Request payload:
- *   [worker_id: 4 bytes][port: 2 bytes]
- * 
+ *   [worker_id: 4 bytes][service_port: 2 bytes][data_port: 2 bytes]
+ *
  * Response: ACK
  */
 static int handle_worker_register(rpc_async_context_t *context,
                                   const uint8_t *in_data, size_t in_len) {
-    if (!g_router_state || in_len != 4) {
+    if (!g_router_state || in_len != 6) {
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
-    
+
     node_id_t worker_id;
-    uint16_t worker_port;
-    
+    uint16_t service_port;
+    uint16_t data_port;
+
     memcpy(&worker_id, in_data, sizeof(node_id_t));
-    memcpy(&worker_port, in_data + sizeof(node_id_t), sizeof(uint16_t));
-    
+    memcpy(&service_port, in_data + sizeof(node_id_t), sizeof(uint16_t));
+    memcpy(&data_port, in_data + sizeof(node_id_t) + 2, sizeof(uint16_t));
+
     // Extract IP from connection (simplified - get peer address)
     char worker_ip[16] = "127.0.0.1"; // TODO: Extract from socket
-    
-    ROOLE_LOG_INFO("[RPC] Worker registration: ID=%u, Port=%u", worker_id, worker_port);
-    
-    router_on_worker_join(g_router_state, worker_id, worker_ip, worker_port);
-    
+
+    ROOLE_LOG_INFO("[RPC] Worker registration: ID=%u, SERVICE:%u, DATA:%u",
+                   worker_id, service_port, data_port);
+
+    router_on_worker_join(g_router_state, worker_id, worker_ip, service_port, data_port);
+
     uint8_t ack = 1;
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
 }

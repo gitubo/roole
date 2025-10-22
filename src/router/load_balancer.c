@@ -35,33 +35,38 @@ int worker_pool_init(worker_pool_t *pool, size_t capacity) {
 
 void worker_pool_destroy(worker_pool_t *pool) {
     if (!pool) return;
-    
+
     pthread_mutex_lock(&pool->lock);
-    
-    // Close all RPC channels
+
+    // Close all RPC channels (both service and data)
     for (size_t i = 0; i < pool->count; i++) {
-        if (pool->workers[i].rpc_channel) {
-            rpc_channel_destroy(pool->workers[i].rpc_channel);
-            roole_free(pool->workers[i].rpc_channel);
+        if (pool->workers[i].service_channel) {
+            rpc_channel_destroy(pool->workers[i].service_channel);
+            roole_free(pool->workers[i].service_channel);
+        }
+        if (pool->workers[i].data_channel) {
+            rpc_channel_destroy(pool->workers[i].data_channel);
+            roole_free(pool->workers[i].data_channel);
         }
     }
-    
+
     roole_free(pool->workers);
     pool->workers = NULL;
     pool->count = 0;
     pool->capacity = 0;
-    
+
     pthread_mutex_unlock(&pool->lock);
     pthread_mutex_destroy(&pool->lock);
-    
+
     ROOLE_LOG_INFO("Worker pool destroyed");
 }
 
-int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip, uint16_t port) {
+int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
+                    uint16_t service_port, uint16_t data_port) {
     if (!pool || !ip) return ROOLE_ERR_INVALID;
-    
+
     pthread_mutex_lock(&pool->lock);
-    
+
     // Check if already exists
     for (size_t i = 0; i < pool->count; i++) {
         if (pool->workers[i].worker_id == worker_id) {
@@ -70,61 +75,68 @@ int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip, ui
             return ROOLE_OK;
         }
     }
-    
+
     // Add new worker
     if (pool->count >= pool->capacity) {
         pthread_mutex_unlock(&pool->lock);
         ROOLE_LOG_ERROR("Worker pool full (capacity: %zu)", pool->capacity);
         return ROOLE_ERR_FULL;
     }
-    
+
     worker_info_t *worker = &pool->workers[pool->count];
     memset(worker, 0, sizeof(worker_info_t));
-    
+
     worker->worker_id = worker_id;
     roole_strncpy_safe(worker->ip, ip, MAX_IP_LEN);
-    worker->port = port;
+    worker->service_port = service_port;
+    worker->data_port = data_port;
     worker->status = NODE_STATUS_ALIVE;
     worker->active_executions = 0;
     worker->load_score = 0.0f;
     worker->last_heartbeat_ms = roole_time_now_ms();
-    worker->rpc_channel = NULL;  // Will be initialized when needed
-    
+    worker->service_channel = NULL;  // Will be initialized when needed
+    worker->data_channel = NULL;     // Will be initialized when needed
+
     pool->count++;
-    
+
     pthread_mutex_unlock(&pool->lock);
-    
-    ROOLE_LOG_INFO("Added worker %u (%s:%u) to pool", worker_id, ip, port);
+
+    ROOLE_LOG_INFO("Added worker %u (%s SERVICE:%u DATA:%u) to pool",
+                   worker_id, ip, service_port, data_port);
     return ROOLE_OK;
 }
 
 int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id) {
     if (!pool) return ROOLE_ERR_INVALID;
-    
+
     pthread_mutex_lock(&pool->lock);
-    
+
     for (size_t i = 0; i < pool->count; i++) {
         if (pool->workers[i].worker_id == worker_id) {
-            // Close RPC channel
-            if (pool->workers[i].rpc_channel) {
-                rpc_channel_destroy(pool->workers[i].rpc_channel);
-                roole_free(pool->workers[i].rpc_channel);
+            // Close RPC channels (both service and data)
+            if (pool->workers[i].service_channel) {
+                rpc_channel_destroy(pool->workers[i].service_channel);
+                roole_free(pool->workers[i].service_channel);
             }
-            
+            if (pool->workers[i].data_channel) {
+                rpc_channel_destroy(pool->workers[i].data_channel);
+                roole_free(pool->workers[i].data_channel);
+            }
+
             // Shift remaining workers
             if (i < pool->count - 1) {
                 memmove(&pool->workers[i], &pool->workers[i + 1],
                        (pool->count - i - 1) * sizeof(worker_info_t));
             }
-            
+
             pool->count--;
-            
+
             pthread_mutex_unlock(&pool->lock);
             ROOLE_LOG_INFO("Removed worker %u from pool", worker_id);
             return ROOLE_OK;
         }
     }
-    
+
     pthread_mutex_unlock(&pool->lock);
     return ROOLE_ERR_NOTFOUND;
 }
