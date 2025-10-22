@@ -1,0 +1,9 @@
+build/
+cmake/
+dockerfile
+Dockerfile
+*.crt
+*.o
+*.obj
+*.exe
+*.out
