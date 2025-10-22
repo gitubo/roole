@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    // Start worker (background threads)
+    // Start workesendr (background threads)
     if (worker_start(&g_worker) != ROOLE_OK) {
         ROOLE_LOG_ERROR("Failed to start worker");
         worker_shutdown(&g_worker);
