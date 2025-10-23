@@ -14,7 +14,7 @@ static volatile int g_shutdown_requested = 0;
 
 static void signal_handler(int sig) {
     (void)sig;
-    ROOLE_LOG_INFO("Shutdown signal received");
+    LOG_INFO("Shutdown signal received");
     g_shutdown_requested = 1;
 }
 
@@ -35,19 +35,19 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
     
     // Set log level
-    roole_log_set_level(ROOLE_LOG_INFO);
+    log_set_level(LOG_LEVEL_INFO);
     
-    ROOLE_LOG_INFO("========================================");
-    ROOLE_LOG_INFO("Roole Router Starting");
-    ROOLE_LOG_INFO("  Router ID: %u", router_id);
-    ROOLE_LOG_INFO("  SERVICE Port: %u", service_port);
-    ROOLE_LOG_INFO("  DATA Port: %u", data_port);
-    ROOLE_LOG_INFO("  INGRESS Port: %u", ingress_port);
-    ROOLE_LOG_INFO("========================================");
+    LOG_INFO("========================================");
+    LOG_INFO("Roole Router Starting");
+    LOG_INFO("  Router ID: %u", router_id);
+    LOG_INFO("  SERVICE Port: %u", service_port);
+    LOG_INFO("  DATA Port: %u", data_port);
+    LOG_INFO("  INGRESS Port: %u", ingress_port);
+    LOG_INFO("========================================");
 
     // Initialize router
-    if (router_init(&g_router, router_id, service_port, data_port, ingress_port) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to initialize router");
+    if (router_init(&g_router, router_id, service_port, data_port, ingress_port) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize router");
         return 1;
     }
     
@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
         .dag_id = 1,
         .version = 1,
         .step_count = 2,
-        .created_at_ms = roole_time_now_ms()
+        .created_at_ms = time_now_ms()
     };
     snprintf(test_dag.name, MAX_DAG_NAME, "test_dag");
     
@@ -81,13 +81,13 @@ int main(int argc, char **argv) {
     test_dag.steps[1].timeout_ms = 10000;
     test_dag.steps[1].max_retries = 3;
     
-    if (router_add_dag(&g_router, &test_dag) != ROOLE_OK) {
-        ROOLE_LOG_WARN("Failed to add test DAG (may be normal if already exists)");
+    if (router_add_dag(&g_router, &test_dag) != RESULT_OK) {
+        LOG_WARN("Failed to add test DAG (may be normal if already exists)");
     }
     
     // Start router (background threads)
-    if (router_start(&g_router) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to start router");
+    if (router_start(&g_router) != RESULT_OK) {
+        LOG_ERROR("Failed to start router");
         router_shutdown(&g_router);
         return 1;
     }
@@ -95,8 +95,8 @@ int main(int argc, char **argv) {
     // Set RPC state and start RPC server (blocking)
     router_set_rpc_state(&g_router);
 
-    ROOLE_LOG_INFO("Router running. Press Ctrl+C to stop.");
-    ROOLE_LOG_INFO("Starting RPC servers on SERVICE:%u, DATA:%u, INGRESS:%u...",
+    LOG_INFO("Router running. Press Ctrl+C to stop.");
+    LOG_INFO("Starting RPC servers on SERVICE:%u, DATA:%u, INGRESS:%u...",
                    service_port, data_port, ingress_port);
 
     // This blocks until shutdown
@@ -105,6 +105,6 @@ int main(int argc, char **argv) {
     // Cleanup after RPC server stops
     router_shutdown(&g_router);
     
-    ROOLE_LOG_INFO("Router stopped. Goodbye!");
+    LOG_INFO("Router stopped. Goodbye!");
     return 0;
 }

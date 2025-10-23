@@ -36,7 +36,7 @@ typedef struct dag_step {
 } dag_step_t;
 
 typedef struct dag {
-    dag_id_t dag_id;
+    rule_id_t dag_id;
     char name[MAX_DAG_NAME];
     uint64_t version;
     
@@ -65,10 +65,10 @@ void dag_catalog_destroy(dag_catalog_t *catalog);
 // CRUD operations (thread-safe)
 int dag_catalog_add(dag_catalog_t *catalog, const dag_t *dag);
 int dag_catalog_update(dag_catalog_t *catalog, const dag_t *dag);
-int dag_catalog_remove(dag_catalog_t *catalog, dag_id_t dag_id);
-dag_t* dag_catalog_get(dag_catalog_t *catalog, dag_id_t dag_id);  // Returns pointer (read-lock held during use)
+int dag_catalog_remove(dag_catalog_t *catalog, rule_id_t dag_id);
+dag_t* dag_catalog_get(dag_catalog_t *catalog, rule_id_t dag_id);  // Returns pointer (read-lock held during use)
 void dag_catalog_release(dag_catalog_t *catalog);  // Release read-lock
-size_t dag_catalog_list(dag_catalog_t *catalog, dag_id_t *out_dag_ids, size_t max_count);
+size_t dag_catalog_list(dag_catalog_t *catalog, rule_id_t *out_dag_ids, size_t max_count);
 
 // Serialization (for Raft log entries / network transfer)
 size_t dag_serialize(const dag_t *dag, uint8_t *buffer, size_t buffer_size);

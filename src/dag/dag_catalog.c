@@ -10,25 +10,25 @@
 // ============================================================================
 
 int dag_catalog_init(dag_catalog_t *catalog, size_t capacity) {
-    if (!catalog || capacity == 0) return ROOLE_ERR_INVALID;
+    if (!catalog || capacity == 0) return RESULT_ERR_INVALID;
     
     memset(catalog, 0, sizeof(dag_catalog_t));
     
-    catalog->dags = roole_calloc(capacity, sizeof(dag_t));
+    catalog->dags = safe_calloc(capacity, sizeof(dag_t));
     if (!catalog->dags) {
-        return ROOLE_ERR_NOMEM;
+        return RESULT_ERR_NOMEM;
     }
     
     catalog->capacity = capacity;
     catalog->count = 0;
     
     if (pthread_rwlock_init(&catalog->lock, NULL) != 0) {
-        roole_free(catalog->dags);
-        return ROOLE_ERR_INVALID;
+        safe_free(catalog->dags);
+        return RESULT_ERR_INVALID;
     }
     
-    ROOLE_LOG_INFO("DAG catalog initialized (capacity: %zu)", capacity);
-    return ROOLE_OK;
+    LOG_INFO("DAG catalog initialized (capacity: %zu)", capacity);
+    return RESULT_OK;
 }
 
 // ============================================================================
@@ -48,7 +48,7 @@ size_t dag_serialize(const dag_t *dag, uint8_t *buffer, size_t buffer_size) {
 
 int dag_deserialize(const uint8_t *buffer, size_t buffer_len, dag_t *out_dag) {
     if (!buffer || !out_dag || buffer_len < sizeof(dag_t)) {
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
     
     // Simple memcpy for now
@@ -61,7 +61,7 @@ int dag_deserialize(const uint8_t *buffer, size_t buffer_len, dag_t *out_dag) {
         out_dag->steps[i].config_len = 0;
     }
     
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 void dag_catalog_destroy(dag_catalog_t *catalog) {
@@ -73,12 +73,12 @@ void dag_catalog_destroy(dag_catalog_t *catalog) {
     for (size_t i = 0; i < catalog->count; i++) {
         for (size_t j = 0; j < catalog->dags[i].step_count; j++) {
             if (catalog->dags[i].steps[j].config_data) {
-                roole_free(catalog->dags[i].steps[j].config_data);
+                safe_free(catalog->dags[i].steps[j].config_data);
             }
         }
     }
     
-    roole_free(catalog->dags);
+    safe_free(catalog->dags);
     catalog->dags = NULL;
     catalog->count = 0;
     catalog->capacity = 0;
@@ -86,11 +86,11 @@ void dag_catalog_destroy(dag_catalog_t *catalog) {
     pthread_rwlock_unlock(&catalog->lock);
     pthread_rwlock_destroy(&catalog->lock);
     
-    ROOLE_LOG_INFO("DAG catalog destroyed");
+    LOG_INFO("DAG catalog destroyed");
 }
 
 int dag_catalog_add(dag_catalog_t *catalog, const dag_t *dag) {
-    if (!catalog || !dag) return ROOLE_ERR_INVALID;
+    if (!catalog || !dag) return RESULT_ERR_INVALID;
     
     pthread_rwlock_wrlock(&catalog->lock);
     
@@ -98,16 +98,16 @@ int dag_catalog_add(dag_catalog_t *catalog, const dag_t *dag) {
     for (size_t i = 0; i < catalog->count; i++) {
         if (catalog->dags[i].dag_id == dag->dag_id) {
             pthread_rwlock_unlock(&catalog->lock);
-            ROOLE_LOG_WARN("DAG %u already exists", dag->dag_id);
-            return ROOLE_ERR_EXISTS;
+            LOG_WARN("DAG %u already exists", dag->dag_id);
+            return RESULT_ERR_EXISTS;
         }
     }
     
     // Check capacity
     if (catalog->count >= catalog->capacity) {
         pthread_rwlock_unlock(&catalog->lock);
-        ROOLE_LOG_ERROR("DAG catalog full (capacity: %zu)", catalog->capacity);
-        return ROOLE_ERR_FULL;
+        LOG_ERROR("DAG catalog full (capacity: %zu)", catalog->capacity);
+        return RESULT_ERR_FULL;
     }
     
     // Deep copy DAG
@@ -117,16 +117,16 @@ int dag_catalog_add(dag_catalog_t *catalog, const dag_t *dag) {
     // Deep copy step config data
     for (size_t i = 0; i < new_dag->step_count; i++) {
         if (dag->steps[i].config_data && dag->steps[i].config_len > 0) {
-            new_dag->steps[i].config_data = roole_malloc(dag->steps[i].config_len);
+            new_dag->steps[i].config_data = safe_malloc(dag->steps[i].config_len);
             if (!new_dag->steps[i].config_data) {
                 // Cleanup on error
                 for (size_t j = 0; j < i; j++) {
                     if (new_dag->steps[j].config_data) {
-                        roole_free(new_dag->steps[j].config_data);
+                        safe_free(new_dag->steps[j].config_data);
                     }
                 }
                 pthread_rwlock_unlock(&catalog->lock);
-                return ROOLE_ERR_NOMEM;
+                return RESULT_ERR_NOMEM;
             }
             memcpy(new_dag->steps[i].config_data, dag->steps[i].config_data, 
                    dag->steps[i].config_len);
@@ -137,13 +137,13 @@ int dag_catalog_add(dag_catalog_t *catalog, const dag_t *dag) {
     
     pthread_rwlock_unlock(&catalog->lock);
     
-    ROOLE_LOG_INFO("Added DAG %u '%s' (version %lu, %zu steps)", 
+    LOG_INFO("Added DAG %u '%s' (version %lu, %zu steps)", 
                    dag->dag_id, dag->name, dag->version, dag->step_count);
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 int dag_catalog_update(dag_catalog_t *catalog, const dag_t *dag) {
-    if (!catalog || !dag) return ROOLE_ERR_INVALID;
+    if (!catalog || !dag) return RESULT_ERR_INVALID;
     
     pthread_rwlock_wrlock(&catalog->lock);
     
@@ -158,14 +158,14 @@ int dag_catalog_update(dag_catalog_t *catalog, const dag_t *dag) {
     
     if (!existing) {
         pthread_rwlock_unlock(&catalog->lock);
-        ROOLE_LOG_WARN("DAG %u not found for update", dag->dag_id);
-        return ROOLE_ERR_NOTFOUND;
+        LOG_WARN("DAG %u not found for update", dag->dag_id);
+        return RESULT_ERR_NOTFOUND;
     }
     
     // Free old config data
     for (size_t i = 0; i < existing->step_count; i++) {
         if (existing->steps[i].config_data) {
-            roole_free(existing->steps[i].config_data);
+            safe_free(existing->steps[i].config_data);
         }
     }
     
@@ -175,7 +175,7 @@ int dag_catalog_update(dag_catalog_t *catalog, const dag_t *dag) {
     // Deep copy new config data
     for (size_t i = 0; i < dag->step_count; i++) {
         if (dag->steps[i].config_data && dag->steps[i].config_len > 0) {
-            existing->steps[i].config_data = roole_malloc(dag->steps[i].config_len);
+            existing->steps[i].config_data = safe_malloc(dag->steps[i].config_len);
             if (existing->steps[i].config_data) {
                 memcpy(existing->steps[i].config_data, dag->steps[i].config_data, 
                        dag->steps[i].config_len);
@@ -183,17 +183,17 @@ int dag_catalog_update(dag_catalog_t *catalog, const dag_t *dag) {
         }
     }
     
-    existing->updated_at_ms = roole_time_now_ms();
+    existing->updated_at_ms = time_now_ms();
     
     pthread_rwlock_unlock(&catalog->lock);
     
-    ROOLE_LOG_INFO("Updated DAG %u '%s' (version %lu)", 
+    LOG_INFO("Updated DAG %u '%s' (version %lu)", 
                    dag->dag_id, dag->name, dag->version);
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
-int dag_catalog_remove(dag_catalog_t *catalog, dag_id_t dag_id) {
-    if (!catalog) return ROOLE_ERR_INVALID;
+int dag_catalog_remove(dag_catalog_t *catalog, rule_id_t dag_id) {
+    if (!catalog) return RESULT_ERR_INVALID;
     
     pthread_rwlock_wrlock(&catalog->lock);
     
@@ -208,14 +208,14 @@ int dag_catalog_remove(dag_catalog_t *catalog, dag_id_t dag_id) {
     
     if (index == SIZE_MAX) {
         pthread_rwlock_unlock(&catalog->lock);
-        ROOLE_LOG_WARN("DAG %u not found for removal", dag_id);
-        return ROOLE_ERR_NOTFOUND;
+        LOG_WARN("DAG %u not found for removal", dag_id);
+        return RESULT_ERR_NOTFOUND;
     }
     
     // Free config data
     for (size_t i = 0; i < catalog->dags[index].step_count; i++) {
         if (catalog->dags[index].steps[i].config_data) {
-            roole_free(catalog->dags[index].steps[i].config_data);
+            safe_free(catalog->dags[index].steps[i].config_data);
         }
     }
     
@@ -229,11 +229,11 @@ int dag_catalog_remove(dag_catalog_t *catalog, dag_id_t dag_id) {
     
     pthread_rwlock_unlock(&catalog->lock);
     
-    ROOLE_LOG_INFO("Removed DAG %u", dag_id);
-    return ROOLE_OK;
+    LOG_INFO("Removed DAG %u", dag_id);
+    return RESULT_OK;
 }
 
-dag_t* dag_catalog_get(dag_catalog_t *catalog, dag_id_t dag_id) {
+dag_t* dag_catalog_get(dag_catalog_t *catalog, rule_id_t dag_id) {
     if (!catalog) return NULL;
     
     pthread_rwlock_rdlock(&catalog->lock);
@@ -255,7 +255,7 @@ void dag_catalog_release(dag_catalog_t *catalog) {
     }
 }
 
-size_t dag_catalog_list(dag_catalog_t *catalog, dag_id_t *out_dag_ids, size_t max_count) {
+size_t dag_catalog_list(dag_catalog_t *catalog, rule_id_t *out_dag_ids, size_t max_count) {
     if (!catalog || !out_dag_ids || max_count == 0) return 0;
     
     pthread_rwlock_rdlock(&catalog->lock);
@@ -275,11 +275,11 @@ size_t dag_catalog_list(dag_catalog_t *catalog, dag_id_t *out_dag_ids, size_t ma
 // ============================================================================
 
 int dag_validate(const dag_t *dag) {
-    if (!dag) return ROOLE_ERR_INVALID;
+    if (!dag) return RESULT_ERR_INVALID;
     
     if (dag->step_count == 0 || dag->step_count > MAX_DAG_STEPS) {
-        ROOLE_LOG_ERROR("Invalid step count: %zu", dag->step_count);
-        return ROOLE_ERR_INVALID;
+        LOG_ERROR("Invalid step count: %zu", dag->step_count);
+        return RESULT_ERR_INVALID;
     }
     
     // Check for valid step IDs and dependencies
@@ -299,14 +299,14 @@ int dag_validate(const dag_t *dag) {
             }
             
             if (!found) {
-                ROOLE_LOG_ERROR("Step %u has invalid dependency %u", 
+                LOG_ERROR("Step %u has invalid dependency %u", 
                                step->step_id, dep_id);
-                return ROOLE_ERR_INVALID;
+                return RESULT_ERR_INVALID;
             }
         }
     }
     
     // TODO: Check for cycles using DFS
     
-    return ROOLE_OK;
+    return RESULT_OK;
 }

@@ -12,25 +12,25 @@
 // ============================================================================
 
 int worker_pool_init(worker_pool_t *pool, size_t capacity) {
-    if (!pool || capacity == 0) return ROOLE_ERR_INVALID;
+    if (!pool || capacity == 0) return RESULT_ERR_INVALID;
     
     memset(pool, 0, sizeof(worker_pool_t));
     
-    pool->workers = roole_calloc(capacity, sizeof(worker_info_t));
+    pool->workers = safe_calloc(capacity, sizeof(worker_info_t));
     if (!pool->workers) {
-        return ROOLE_ERR_NOMEM;
+        return RESULT_ERR_NOMEM;
     }
     
     pool->capacity = capacity;
     pool->count = 0;
     
     if (pthread_mutex_init(&pool->lock, NULL) != 0) {
-        roole_free(pool->workers);
-        return ROOLE_ERR_INVALID;
+        safe_free(pool->workers);
+        return RESULT_ERR_INVALID;
     }
     
-    ROOLE_LOG_INFO("Worker pool initialized (capacity: %zu)", capacity);
-    return ROOLE_OK;
+    LOG_INFO("Worker pool initialized (capacity: %zu)", capacity);
+    return RESULT_OK;
 }
 
 void worker_pool_destroy(worker_pool_t *pool) {
@@ -42,15 +42,15 @@ void worker_pool_destroy(worker_pool_t *pool) {
     for (size_t i = 0; i < pool->count; i++) {
         if (pool->workers[i].service_channel) {
             rpc_channel_destroy(pool->workers[i].service_channel);
-            roole_free(pool->workers[i].service_channel);
+            safe_free(pool->workers[i].service_channel);
         }
         if (pool->workers[i].data_channel) {
             rpc_channel_destroy(pool->workers[i].data_channel);
-            roole_free(pool->workers[i].data_channel);
+            safe_free(pool->workers[i].data_channel);
         }
     }
 
-    roole_free(pool->workers);
+    safe_free(pool->workers);
     pool->workers = NULL;
     pool->count = 0;
     pool->capacity = 0;
@@ -58,12 +58,15 @@ void worker_pool_destroy(worker_pool_t *pool) {
     pthread_mutex_unlock(&pool->lock);
     pthread_mutex_destroy(&pool->lock);
 
-    ROOLE_LOG_INFO("Worker pool destroyed");
+    LOG_INFO("Worker pool destroyed");
 }
+
+// COMMENT: Fix worker_pool_add to NOT initialize channels (they come from connection)
+// Modify worker_pool_add function (around line 60):
 
 int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
                     uint16_t service_port, uint16_t data_port) {
-    if (!pool || !ip) return ROOLE_ERR_INVALID;
+    if (!pool || !ip) return RESULT_ERR_INVALID;
 
     pthread_mutex_lock(&pool->lock);
 
@@ -71,43 +74,45 @@ int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
     for (size_t i = 0; i < pool->count; i++) {
         if (pool->workers[i].worker_id == worker_id) {
             pthread_mutex_unlock(&pool->lock);
-            ROOLE_LOG_DEBUG("Worker %u already in pool", worker_id);
-            return ROOLE_OK;
+            LOG_DEBUG("Worker %u already in pool", worker_id);
+            return RESULT_OK;
         }
     }
 
     // Add new worker
     if (pool->count >= pool->capacity) {
         pthread_mutex_unlock(&pool->lock);
-        ROOLE_LOG_ERROR("Worker pool full (capacity: %zu)", pool->capacity);
-        return ROOLE_ERR_FULL;
+        LOG_ERROR("Worker pool full (capacity: %zu)", pool->capacity);
+        return RESULT_ERR_FULL;
     }
 
     worker_info_t *worker = &pool->workers[pool->count];
     memset(worker, 0, sizeof(worker_info_t));
 
     worker->worker_id = worker_id;
-    roole_strncpy_safe(worker->ip, ip, MAX_IP_LEN);
+    safe_strncpy(worker->ip, ip, MAX_IP_LEN);
     worker->service_port = service_port;
     worker->data_port = data_port;
     worker->status = NODE_STATUS_ALIVE;
     worker->active_executions = 0;
     worker->load_score = 0.0f;
-    worker->last_heartbeat_ms = roole_time_now_ms();
-    worker->service_channel = NULL;  // Will be initialized when needed
-    worker->data_channel = NULL;     // Will be initialized when needed
+    worker->last_heartbeat_ms = time_now_ms();
+    
+    // COMMENT: Initialize channels as NULL - they will be created on-demand
+    worker->service_channel = NULL;
+    worker->data_channel = NULL;
 
     pool->count++;
 
     pthread_mutex_unlock(&pool->lock);
 
-    ROOLE_LOG_INFO("Added worker %u (%s SERVICE:%u DATA:%u) to pool",
+    LOG_INFO("Added worker %u (%s SERVICE:%u DATA:%u) to pool",
                    worker_id, ip, service_port, data_port);
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id) {
-    if (!pool) return ROOLE_ERR_INVALID;
+    if (!pool) return RESULT_ERR_INVALID;
 
     pthread_mutex_lock(&pool->lock);
 
@@ -116,11 +121,11 @@ int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id) {
             // Close RPC channels (both service and data)
             if (pool->workers[i].service_channel) {
                 rpc_channel_destroy(pool->workers[i].service_channel);
-                roole_free(pool->workers[i].service_channel);
+                safe_free(pool->workers[i].service_channel);
             }
             if (pool->workers[i].data_channel) {
                 rpc_channel_destroy(pool->workers[i].data_channel);
-                roole_free(pool->workers[i].data_channel);
+                safe_free(pool->workers[i].data_channel);
             }
 
             // Shift remaining workers
@@ -132,17 +137,17 @@ int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id) {
             pool->count--;
 
             pthread_mutex_unlock(&pool->lock);
-            ROOLE_LOG_INFO("Removed worker %u from pool", worker_id);
-            return ROOLE_OK;
+            LOG_INFO("Removed worker %u from pool", worker_id);
+            return RESULT_OK;
         }
     }
 
     pthread_mutex_unlock(&pool->lock);
-    return ROOLE_ERR_NOTFOUND;
+    return RESULT_ERR_NOTFOUND;
 }
 
 int worker_pool_update_status(worker_pool_t *pool, node_id_t worker_id, node_status_t status) {
-    if (!pool) return ROOLE_ERR_INVALID;
+    if (!pool) return RESULT_ERR_INVALID;
     
     pthread_mutex_lock(&pool->lock);
     
@@ -150,18 +155,18 @@ int worker_pool_update_status(worker_pool_t *pool, node_id_t worker_id, node_sta
         if (pool->workers[i].worker_id == worker_id) {
             pool->workers[i].status = status;
             pthread_mutex_unlock(&pool->lock);
-            ROOLE_LOG_DEBUG("Worker %u status updated to %d", worker_id, status);
-            return ROOLE_OK;
+            LOG_DEBUG("Worker %u status updated to %d", worker_id, status);
+            return RESULT_OK;
         }
     }
     
     pthread_mutex_unlock(&pool->lock);
-    return ROOLE_ERR_NOTFOUND;
+    return RESULT_ERR_NOTFOUND;
 }
 
 int worker_pool_update_load(worker_pool_t *pool, node_id_t worker_id, 
                             uint32_t active_execs, float load_score) {
-    if (!pool) return ROOLE_ERR_INVALID;
+    if (!pool) return RESULT_ERR_INVALID;
     
     pthread_mutex_lock(&pool->lock);
     
@@ -169,17 +174,17 @@ int worker_pool_update_load(worker_pool_t *pool, node_id_t worker_id,
         if (pool->workers[i].worker_id == worker_id) {
             pool->workers[i].active_executions = active_execs;
             pool->workers[i].load_score = load_score;
-            pool->workers[i].last_heartbeat_ms = roole_time_now_ms();
+            pool->workers[i].last_heartbeat_ms = time_now_ms();
             
             pthread_mutex_unlock(&pool->lock);
-            ROOLE_LOG_DEBUG("Worker %u load: %u execs, score %.2f", 
+            LOG_DEBUG("Worker %u load: %u execs, score %.2f", 
                            worker_id, active_execs, load_score);
-            return ROOLE_OK;
+            return RESULT_OK;
         }
     }
     
     pthread_mutex_unlock(&pool->lock);
-    return ROOLE_ERR_NOTFOUND;
+    return RESULT_ERR_NOTFOUND;
 }
 
 worker_info_t* worker_pool_get(worker_pool_t *pool, node_id_t worker_id) {

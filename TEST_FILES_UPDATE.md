@@ -61,10 +61,10 @@ uint16_t ingress_port = (uint16_t)atoi(argv[4]);
 
 ```c
 // PRIMA
-if (router_init(&g_router, router_id, port) != ROOLE_OK) {
+if (router_init(&g_router, router_id, port) != RESULT_OK) {
 
 // DOPO
-if (router_init(&g_router, router_id, service_port, data_port, ingress_port) != ROOLE_OK) {
+if (router_init(&g_router, router_id, service_port, data_port, ingress_port) != RESULT_OK) {
 ```
 
 #### 3. Avvio server RPC (Linea 103)
@@ -136,21 +136,21 @@ uint16_t router_data_port = (argc >= 8) ? (uint16_t)atoi(argv[7]) : 6001;
 
 ```c
 // PRIMA
-if (worker_init(&g_worker, worker_id, port, num_threads) != ROOLE_OK) {
+if (worker_init(&g_worker, worker_id, port, num_threads) != RESULT_OK) {
 
 // DOPO
-if (worker_init(&g_worker, worker_id, service_port, data_port, num_threads) != ROOLE_OK) {
+if (worker_init(&g_worker, worker_id, service_port, data_port, num_threads) != RESULT_OK) {
 ```
 
 #### 3. Registrazione con router (Linea 74)
 
 ```c
 // PRIMA
-if (worker_register_with_router(&g_worker, router_ip, router_port) == ROOLE_OK) {
+if (worker_register_with_router(&g_worker, router_ip, router_port) == RESULT_OK) {
 
 // DOPO
 if (worker_register_with_router(&g_worker, router_ip,
-                               router_service_port, router_data_port) == ROOLE_OK) {
+                               router_service_port, router_data_port) == RESULT_OK) {
 ```
 
 #### 4. Avvio server RPC (Linea 92)

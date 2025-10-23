@@ -11,8 +11,8 @@
 #include "roole/rpc.h"
 #include "roole/common.h"
 
-#define FUNC_ID_SUBMIT_TASK 0x40
-#define FUNC_ID_GET_STATUS 0x41
+//#define FUNC_ID_SUBMIT_MESSAGE 0x25  
+//#define FUNC_ID_GET_STATUS 0x41
 
 // Helper to send and receive RPC
 static int send_full(int fd, const uint8_t *buffer, size_t length) {
@@ -52,37 +52,37 @@ int main(int argc, char **argv) {
     uint16_t router_port = (uint16_t)atoi(argv[2]);
     const char *message = (argc >= 4) ? argv[3] : "Test Message";
     
-    roole_log_set_level(ROOLE_LOG_INFO);
+    log_set_level(LOG_LEVEL_INFO);
     
-    ROOLE_LOG_INFO("========================================");
-    ROOLE_LOG_INFO("Roole RPC Client");
-    ROOLE_LOG_INFO("  Router: %s:%u", router_ip, router_port);
-    ROOLE_LOG_INFO("  Message: %s", message);
-    ROOLE_LOG_INFO("========================================\n");
+    LOG_INFO("========================================");
+    LOG_INFO("Roole RPC Client");
+    LOG_INFO("  Router: %s:%u", router_ip, router_port);
+    LOG_INFO("  Message: %s", message);
+    LOG_INFO("========================================\n");
     
     // Connect to router's INGRESS channel (for client requests)
     rpc_channel_t channel;
     if (rpc_client_connect(&channel, router_ip, router_port, RPC_CHANNEL_INGRESS, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to connect to router INGRESS channel");
+        LOG_ERROR("Failed to connect to router INGRESS channel");
         return 1;
     }
 
-    ROOLE_LOG_INFO("Connected to router INGRESS channel\n");
+    LOG_INFO("Connected to router INGRESS channel\n");
     
     // ========================================================================
     // TEST 1: Submit Task
     // ========================================================================
     
-    ROOLE_LOG_INFO("TEST 1: Submitting task...");
+    LOG_INFO("TEST 1: Submitting message...");
     
-    dag_id_t dag_id = 1;  // Use test DAG created by router
+    rule_id_t dag_id = 1;  // Use test DAG created by router
     size_t message_len = strlen(message);
     
     // Build request payload: [dag_id][message]
-    size_t payload_len = sizeof(dag_id_t) + message_len;
+    size_t payload_len = sizeof(rule_id_t) + message_len;
     uint8_t *payload = malloc(payload_len);
-    memcpy(payload, &dag_id, sizeof(dag_id_t));
-    memcpy(payload + sizeof(dag_id_t), message, message_len);
+    memcpy(payload, &dag_id, sizeof(rule_id_t));
+    memcpy(payload + sizeof(rule_id_t), message, message_len);
     
     // Pack RPC message
     static uint32_t request_id = 1;
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
         request_id++,
         RPC_TYPE_REQUEST,
         RPC_STATUS_UNKNOWN,
-        FUNC_ID_SUBMIT_TASK,
+        FUNC_ID_SUBMIT_MESSAGE,  // CHANGED
         payload,
         payload_len
     );
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
     
     // Send request
     if (send_full(channel.socket_fd, channel.tx_buffer, rpc_msg_len) != 0) {
-        ROOLE_LOG_ERROR("Failed to send request");
+        LOG_ERROR("Failed to send request");
         rpc_channel_destroy(&channel);
         return 1;
     }
@@ -108,13 +108,13 @@ int main(int argc, char **argv) {
     // Receive response header
     rpc_header_t resp_header;
     if (recv_full(channel.socket_fd, channel.rx_buffer, RPC_HEADER_SIZE) != 0) {
-        ROOLE_LOG_ERROR("Failed to receive response header");
+        LOG_ERROR("Failed to receive response header");
         rpc_channel_destroy(&channel);
         return 1;
     }
     
     if (rpc_unpack_header(channel.rx_buffer, &resp_header) != 0) {
-        ROOLE_LOG_ERROR("Invalid response header");
+        LOG_ERROR("Invalid response header");
         rpc_channel_destroy(&channel);
         return 1;
     }
@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
     size_t resp_payload_len = resp_header.total_len - RPC_HEADER_SIZE;
     if (resp_payload_len > 0) {
         if (recv_full(channel.socket_fd, channel.rx_buffer + RPC_HEADER_SIZE, resp_payload_len) != 0) {
-            ROOLE_LOG_ERROR("Failed to receive response payload");
+            LOG_ERROR("Failed to receive response payload");
             rpc_channel_destroy(&channel);
             return 1;
         }
@@ -131,14 +131,14 @@ int main(int argc, char **argv) {
     
     // Parse response
     if (resp_header.type_and_status.fields.status != RPC_STATUS_SUCCESS) {
-        ROOLE_LOG_ERROR("Task submission failed (status: %d)", 
+        LOG_ERROR("Message submission failed (status: %d)", 
                        resp_header.type_and_status.fields.status);
         rpc_channel_destroy(&channel);
         return 1;
     }
     
     if (resp_payload_len < 9) {
-        ROOLE_LOG_ERROR("Invalid response payload length: %zu", resp_payload_len);
+        LOG_ERROR("Invalid response payload length: %zu", resp_payload_len);
         rpc_channel_destroy(&channel);
         return 1;
     }
@@ -148,15 +148,15 @@ int main(int argc, char **argv) {
     memcpy(&exec_id, channel.rx_buffer + RPC_HEADER_SIZE, sizeof(execution_id_t));
     memcpy(&exec_status, channel.rx_buffer + RPC_HEADER_SIZE + 8, 1);
     
-    ROOLE_LOG_INFO("✓ Task submitted successfully!");
-    ROOLE_LOG_INFO("  Execution ID: %lu", exec_id);
-    ROOLE_LOG_INFO("  Status: %u (PENDING)\n", exec_status);
+    LOG_INFO("✓ Mesage submitted successfully!");
+    LOG_INFO("  Execution ID: %lu", exec_id);
+    LOG_INFO("  Status: %u (PENDING)\n", exec_status);
     
     // ========================================================================
     // TEST 2: Poll Execution Status
     // ========================================================================
     
-    ROOLE_LOG_INFO("TEST 2: Polling execution status...\n");
+    LOG_INFO("TEST 2: Polling execution status...\n");
     
     for (int i = 0; i < 10; i++) {
         sleep(1);
@@ -178,18 +178,18 @@ int main(int argc, char **argv) {
         
         // Send status request
         if (send_full(channel.socket_fd, channel.tx_buffer, rpc_msg_len) != 0) {
-            ROOLE_LOG_ERROR("Failed to send status request");
+            LOG_ERROR("Failed to send status request");
             break;
         }
         
         // Receive status response header
         if (recv_full(channel.socket_fd, channel.rx_buffer, RPC_HEADER_SIZE) != 0) {
-            ROOLE_LOG_ERROR("Failed to receive status response");
+            LOG_ERROR("Failed to receive status response");
             break;
         }
         
         if (rpc_unpack_header(channel.rx_buffer, &resp_header) != 0) {
-            ROOLE_LOG_ERROR("Invalid status response header");
+            LOG_ERROR("Invalid status response header");
             break;
         }
         
@@ -197,13 +197,13 @@ int main(int argc, char **argv) {
         resp_payload_len = resp_header.total_len - RPC_HEADER_SIZE;
         if (resp_payload_len > 0) {
             if (recv_full(channel.socket_fd, channel.rx_buffer + RPC_HEADER_SIZE, resp_payload_len) != 0) {
-                ROOLE_LOG_ERROR("Failed to receive status payload");
+                LOG_ERROR("Failed to receive status payload");
                 break;
             }
         }
         
         if (resp_header.type_and_status.fields.status != RPC_STATUS_SUCCESS) {
-            ROOLE_LOG_ERROR("Status query failed");
+            LOG_ERROR("Status query failed");
             break;
         }
         
@@ -218,13 +218,13 @@ int main(int argc, char **argv) {
             default: status_str = "UNKNOWN"; break;
         }
         
-        ROOLE_LOG_INFO("[Poll %d/10] Status: %s", i + 1, status_str);
+        LOG_INFO("[Poll %d/10] Status: %s", i + 1, status_str);
         
         if (current_status == 2) {  // COMPLETED
-            ROOLE_LOG_INFO("\n✓ Execution completed successfully!");
+            LOG_INFO("\n✓ Execution completed successfully!");
             break;
         } else if (current_status == 3) {  // FAILED
-            ROOLE_LOG_ERROR("\n✗ Execution failed!");
+            LOG_ERROR("\n✗ Execution failed!");
             break;
         }
     }
@@ -232,9 +232,9 @@ int main(int argc, char **argv) {
     // Cleanup
     rpc_channel_destroy(&channel);
     
-    ROOLE_LOG_INFO("\n========================================");
-    ROOLE_LOG_INFO("Client test completed");
-    ROOLE_LOG_INFO("========================================");
+    LOG_INFO("\n========================================");
+    LOG_INFO("Client test completed");
+    LOG_INFO("========================================");
     
     return 0;
 }

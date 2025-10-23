@@ -8,55 +8,17 @@
 #include <string.h>
 #include <stdlib.h>
 
+
+
 // Global router state (set by router_start_rpc_server)
-static router_state_t *g_router_state = NULL;
+router_state_t *g_router_state = NULL;
+
+int handle_submit_message(rpc_async_context_t *context, 
+                          const uint8_t *in_data, size_t in_len);
+
 
 void router_set_rpc_state(router_state_t *router) {
     g_router_state = router;
-}
-
-// ============================================================================
-// HANDLER: Submit Task (Client -> Router)
-// ============================================================================
-
-/**
- * Request payload:
- *   [dag_id: 4 bytes][message: variable]
- * 
- * Response payload:
- *   [exec_id: 8 bytes][status: 1 byte]
- */
-static int handle_submit_task(rpc_async_context_t *context, 
-                              const uint8_t *in_data, size_t in_len) {
-    if (!g_router_state || in_len < sizeof(dag_id_t)) {
-        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
-    }
-    
-    // Deserialize request
-    dag_id_t dag_id;
-    memcpy(&dag_id, in_data, sizeof(dag_id_t));
-    
-    const uint8_t *message = in_data + sizeof(dag_id_t);
-    size_t message_len = in_len - sizeof(dag_id_t);
-    
-    ROOLE_LOG_INFO("[RPC] Received task submission (DAG %u, %zu bytes)", dag_id, message_len);
-    
-    // Submit to router
-    execution_id_t exec_id;
-    int result = router_submit_message(g_router_state, dag_id, message, message_len, &exec_id);
-    
-    if (result != ROOLE_OK) {
-        ROOLE_LOG_ERROR("[RPC] Failed to submit task");
-        return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
-    }
-    
-    // Build response: [exec_id][status]
-    uint8_t response[9];
-    memcpy(response, &exec_id, sizeof(execution_id_t));
-    response[8] = (uint8_t)EXEC_STATUS_PENDING;
-    
-    ROOLE_LOG_INFO("[RPC] Task submitted successfully (exec_id: %lu)", exec_id);
-    return rpc_send_async_response(context, RPC_STATUS_SUCCESS, response, 9);
 }
 
 // ============================================================================
@@ -82,7 +44,7 @@ static int handle_get_execution_status(rpc_async_context_t *context,
     execution_status_t status;
     int result = router_get_execution_status(g_router_state, exec_id, &status);
     
-    if (result != ROOLE_OK) {
+    if (result != RESULT_OK) {
         return rpc_send_async_response(context, RPC_STATUS_FUNC_NOT_FOUND, NULL, 0);
     }
     
@@ -102,9 +64,9 @@ static int handle_get_execution_status(rpc_async_context_t *context,
  */
 static int handle_worker_heartbeat(rpc_async_context_t *context,
                                    const uint8_t *in_data, size_t in_len) {
-    ROOLE_LOG_DEBUG("Hearthbeat arrived");
+    LOG_DEBUG("Hearthbeat arrived");
     if (!g_router_state || in_len != 16) {
-        ROOLE_LOG_ERROR("Invalid hearthbeat arrived");
+        LOG_ERROR("Invalid hearthbeat arrived");
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
@@ -169,11 +131,11 @@ static int handle_list_dags(rpc_async_context_t *context,
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
-    dag_id_t dag_ids[MAX_DAGS];
+    rule_id_t dag_ids[MAX_DAGS];
     size_t count = dag_catalog_list(&g_router_state->dag_catalog, dag_ids, MAX_DAGS);
     
     // Build response: [count][dag_id_1][dag_id_2]...
-    size_t response_len = sizeof(uint32_t) + count * sizeof(dag_id_t);
+    size_t response_len = sizeof(uint32_t) + count * sizeof(rule_id_t);
     uint8_t *response = malloc(response_len);
     if (!response) {
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
@@ -181,7 +143,7 @@ static int handle_list_dags(rpc_async_context_t *context,
     
     uint32_t count_u32 = (uint32_t)count;
     memcpy(response, &count_u32, sizeof(uint32_t));
-    memcpy(response + sizeof(uint32_t), dag_ids, count * sizeof(dag_id_t));
+    memcpy(response + sizeof(uint32_t), dag_ids, count * sizeof(rule_id_t));
     
     int result = rpc_send_async_response(context, RPC_STATUS_SUCCESS, response, response_len);
     free(response);
@@ -216,7 +178,7 @@ static int handle_worker_register(rpc_async_context_t *context,
     // Extract IP from connection (simplified - get peer address)
     char worker_ip[16] = "127.0.0.1"; // TODO: Extract from socket
 
-    ROOLE_LOG_INFO("[RPC] Worker registration: ID=%u, SERVICE:%u, DATA:%u",
+    LOG_INFO("[RPC] Worker registration: ID=%u, SERVICE:%u, DATA:%u",
                    worker_id, service_port, data_port);
 
     router_on_worker_join(g_router_state, worker_id, worker_ip, service_port, data_port);
@@ -231,8 +193,8 @@ static int handle_worker_register(rpc_async_context_t *context,
 
 rpc_service_entry_t router_rpc_service_table[] = {
     // Client operations
-    { 0x40, handle_submit_task, 8192 },           // FUNC_ID_SUBMIT_TASK
-    { 0x41, handle_get_execution_status, 16 },    // FUNC_ID_GET_STATUS
+    { FUNC_ID_SUBMIT_MESSAGE, handle_submit_message, 8192 },  // NEW: Message-based API
+    { FUNC_ID_GET_STATUS, handle_get_execution_status, 16 },
     { FUNC_ID_LIST_DAGS, handle_list_dags, 4096 },
     
     // Worker operations

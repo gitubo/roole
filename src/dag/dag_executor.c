@@ -38,9 +38,9 @@ static int step_dependencies_met(const dag_execution_context_t *ctx, const dag_s
 
 // Execute a single step (stub implementation)
 int dag_execute_step(dag_execution_context_t *ctx, const dag_step_t *step) {
-    if (!ctx || !step) return ROOLE_ERR_INVALID;
+    if (!ctx || !step) return RESULT_ERR_INVALID;
     
-    ROOLE_LOG_INFO("Executing step %u: %s (function: %s)", 
+    LOG_INFO("Executing step %u: %s (function: %s)", 
                    step->step_id, step->name, step->function_name);
     
     // TODO: Implement actual step execution
@@ -60,18 +60,18 @@ int dag_execute_step(dag_execution_context_t *ctx, const dag_step_t *step) {
         ctx->output_len = ctx->input_len;
     }
     
-    ROOLE_LOG_DEBUG("Step %u completed", step->step_id);
-    return ROOLE_OK;
+    LOG_DEBUG("Step %u completed", step->step_id);
+    return RESULT_OK;
 }
 
 // Execute entire DAG (topological order)
 int dag_execute(dag_execution_context_t *ctx) {
-    if (!ctx || !ctx->dag) return ROOLE_ERR_INVALID;
+    if (!ctx || !ctx->dag) return RESULT_ERR_INVALID;
     
     ctx->status = DAG_EXEC_STATUS_RUNNING;
-    ctx->start_time_ms = roole_time_now_ms();
+    ctx->start_time_ms = time_now_ms();
     
-    ROOLE_LOG_INFO("Starting DAG execution %lu (DAG %u: %s)", 
+    LOG_INFO("Starting DAG execution %lu (DAG %u: %s)", 
                    ctx->exec_id, ctx->dag->dag_id, ctx->dag->name);
     
     // Initialize step completion tracking
@@ -100,11 +100,11 @@ int dag_execute(dag_execution_context_t *ctx) {
             // Execute step
             int result = dag_execute_step(ctx, step);
             
-            if (result != ROOLE_OK) {
-                ROOLE_LOG_ERROR("Step %u failed", step->step_id);
+            if (result != RESULT_OK) {
+                LOG_ERROR("Step %u failed", step->step_id);
                 ctx->status = DAG_EXEC_STATUS_FAILED;
-                ctx->end_time_ms = roole_time_now_ms();
-                return ROOLE_ERR_INVALID;
+                ctx->end_time_ms = time_now_ms();
+                return RESULT_ERR_INVALID;
             }
             
             // Mark as completed
@@ -115,18 +115,18 @@ int dag_execute(dag_execution_context_t *ctx) {
         
         if (!progress_made) {
             // No progress made - circular dependency or missing dependency
-            ROOLE_LOG_ERROR("DAG execution stuck - possible circular dependency");
+            LOG_ERROR("DAG execution stuck - possible circular dependency");
             ctx->status = DAG_EXEC_STATUS_FAILED;
-            ctx->end_time_ms = roole_time_now_ms();
-            return ROOLE_ERR_INVALID;
+            ctx->end_time_ms = time_now_ms();
+            return RESULT_ERR_INVALID;
         }
     }
     
     ctx->status = DAG_EXEC_STATUS_COMPLETED;
-    ctx->end_time_ms = roole_time_now_ms();
+    ctx->end_time_ms = time_now_ms();
     
     uint64_t duration_ms = ctx->end_time_ms - ctx->start_time_ms;
-    ROOLE_LOG_INFO("DAG execution %lu completed in %lu ms", ctx->exec_id, duration_ms);
+    LOG_INFO("DAG execution %lu completed in %lu ms", ctx->exec_id, duration_ms);
     
-    return ROOLE_OK;
+    return RESULT_OK;
 }

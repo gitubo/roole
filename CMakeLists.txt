@@ -42,6 +42,7 @@ add_library(roole_router STATIC
     src/router/router_core.c
     src/router/load_balancer.c
     src/router/execution_tracker.c
+    src/router/message_handler.c
     src/router/rpc_handler.c
 )
 target_link_libraries(roole_router roole_core roole_dag roole_cluster)
@@ -51,7 +52,8 @@ target_link_libraries(roole_router roole_core roole_dag roole_cluster)
 # ============================================================================
 add_library(roole_worker STATIC
     src/worker/worker_core.c
-    src/worker/task_queue.c
+    src/worker/message_queue.c
+    src/worker/message_handler.c
     src/worker/rpc_handler.c
 )
 target_link_libraries(roole_worker roole_core roole_dag roole_cluster)

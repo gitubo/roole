@@ -25,6 +25,7 @@
 #define RPC_STATUS_BAD_ARGUMENT 0x01
 #define RPC_STATUS_FUNC_NOT_FOUND 0x02
 #define RPC_STATUS_INTERNAL_ERROR 0x03
+#define RPC_STATUS_NETWORK 0x04
 #define RPC_STATUS_UNKNOWN 0xFF
 
 // Function IDs (extended for cluster operations)
@@ -43,6 +44,8 @@
 #define FUNC_ID_EXECUTION_UPDATE 0x22
 #define FUNC_ID_SYNC_CATALOG 0x23
 #define FUNC_ID_WORKER_REGISTRATION 0x24
+#define FUNC_ID_SUBMIT_MESSAGE 0x25        // Client -> Router: Submit message for processing
+#define FUNC_ID_PROCESS_MESSAGE 0x26       // Router -> Worker: Process message on worker
 
 // DAG Management (Router operations)
 #define FUNC_ID_ADD_DAG 0x30
@@ -50,6 +53,7 @@
 #define FUNC_ID_REMOVE_DAG 0x32
 #define FUNC_ID_GET_DAG 0x33
 #define FUNC_ID_LIST_DAGS 0x34
+#define FUNC_ID_GET_STATUS 0x35
 
 typedef union rpc_type_status {
     uint8_t byte;

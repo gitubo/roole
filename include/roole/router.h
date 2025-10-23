@@ -87,7 +87,7 @@ typedef enum {
 
 typedef struct execution_record {
     execution_id_t exec_id;
-    dag_id_t dag_id;
+    rule_id_t dag_id;
     node_id_t assigned_worker;
     execution_status_t status;
     
@@ -105,6 +105,15 @@ typedef struct execution_record {
     int active;  // 1 if tracking, 0 if slot free
 } execution_record_t;
 
+typedef struct message {
+    execution_id_t exec_id;
+    rule_id_t dag_id;
+    uint8_t message_data[MAX_MESSAGE_SIZE];
+    size_t message_len;
+    uint64_t received_at_ms;
+    node_id_t sender_id;  // Original client/sender
+} message_t;
+
 typedef struct execution_tracker {
     execution_record_t *records;
     size_t capacity;
@@ -116,7 +125,7 @@ int execution_tracker_init(execution_tracker_t *tracker, size_t capacity);
 void execution_tracker_destroy(execution_tracker_t *tracker);
 
 // Add new execution
-execution_id_t execution_tracker_add(execution_tracker_t *tracker, dag_id_t dag_id,
+execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag_id,
                                     node_id_t worker_id, const uint8_t *message, 
                                     size_t message_len, uint8_t max_retries);
 
@@ -184,11 +193,11 @@ void router_shutdown(router_state_t *router);
 // DAG management (triggers consensus among routers)
 int router_add_dag(router_state_t *router, const dag_t *dag);
 int router_update_dag(router_state_t *router, const dag_t *dag);
-int router_remove_dag(router_state_t *router, dag_id_t dag_id);
-dag_t* router_get_dag(router_state_t *router, dag_id_t dag_id);
+int router_remove_dag(router_state_t *router, rule_id_t dag_id);
+dag_t* router_get_dag(router_state_t *router, rule_id_t dag_id);
 
 // Message submission & execution
-int router_submit_message(router_state_t *router, dag_id_t dag_id,
+int router_submit_message(router_state_t *router, rule_id_t dag_id,
                          const uint8_t *message, size_t message_len,
                          execution_id_t *out_exec_id);
 

@@ -14,7 +14,7 @@ static volatile int g_shutdown_requested = 0;
 
 static void signal_handler(int sig) {
     (void)sig;
-    ROOLE_LOG_INFO("Shutdown signal received");
+    LOG_INFO("Shutdown signal received");
     g_shutdown_requested = 1;
 }
 
@@ -44,48 +44,48 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
     
     // Set log level
-    roole_log_set_level(ROOLE_LOG_INFO);
+    log_set_level(LOG_LEVEL_INFO);
     
-    ROOLE_LOG_INFO("========================================");
-    ROOLE_LOG_INFO("Roole Worker Starting");
-    ROOLE_LOG_INFO("  Worker ID: %u", worker_id);
-    ROOLE_LOG_INFO("  SERVICE Port: %u", service_port);
-    ROOLE_LOG_INFO("  DATA Port: %u", data_port);
-    ROOLE_LOG_INFO("  Executor Threads: %zu", num_threads);
-    ROOLE_LOG_INFO("========================================");
+    LOG_INFO("========================================");
+    LOG_INFO("Roole Worker Starting");
+    LOG_INFO("  Worker ID: %u", worker_id);
+    LOG_INFO("  SERVICE Port: %u", service_port);
+    LOG_INFO("  DATA Port: %u", data_port);
+    LOG_INFO("  Executor Threads: %zu", num_threads);
+    LOG_INFO("========================================");
 
     // Initialize worker
-    if (worker_init(&g_worker, worker_id, service_port, data_port, num_threads) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to initialize worker");
+    if (worker_init(&g_worker, worker_id, service_port, data_port, num_threads) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize worker");
         return 1;
     }
     
     // Start workesendr (background threads)
-    if (worker_start(&g_worker) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to start worker");
+    if (worker_start(&g_worker) != RESULT_OK) {
+        LOG_ERROR("Failed to start worker");
         worker_shutdown(&g_worker);
         return 1;
     }
     
     // Register with router if specified
     if (router_ip) {
-        ROOLE_LOG_INFO("Attempting to register with router %s (SERVICE:%u, DATA:%u)...",
+        LOG_INFO("Attempting to register with router %s (SERVICE:%u, DATA:%u)...",
                        router_ip, router_service_port, router_data_port);
         if (worker_register_with_router(&g_worker, router_ip,
-                                       router_service_port, router_data_port) == ROOLE_OK) {
-            ROOLE_LOG_INFO("Worker registered successfully!");
+                                       router_service_port, router_data_port) == RESULT_OK) {
+            LOG_INFO("Worker registered successfully!");
         } else {
-            ROOLE_LOG_WARN("Failed to register with router (will retry via heartbeat)");
+            LOG_WARN("Failed to register with router (will retry via heartbeat)");
         }
     } else {
-        ROOLE_LOG_WARN("No router specified. Worker running standalone.");
+        LOG_WARN("No router specified. Worker running standalone.");
     }
-
+    
     // Set RPC state and start RPC server (blocking)
     worker_set_rpc_state(&g_worker);
 
-    ROOLE_LOG_INFO("Worker running. Press Ctrl+C to stop.");
-    ROOLE_LOG_INFO("Starting RPC servers on SERVICE:%u, DATA:%u...",
+    LOG_INFO("Worker running. Press Ctrl+C to stop.");
+    LOG_INFO("Starting RPC servers on SERVICE:%u, DATA:%u...",
                    service_port, data_port);
 
     // This blocks until shutdown
@@ -94,6 +94,6 @@ int main(int argc, char **argv) {
     // Cleanup after RPC server stops
     worker_shutdown(&g_worker);
     
-    ROOLE_LOG_INFO("Worker stopped. Goodbye!");
+    LOG_INFO("Worker stopped. Goodbye!");
     return 0;
 }

@@ -10,25 +10,25 @@
 // ============================================================================
 
 int execution_tracker_init(execution_tracker_t *tracker, size_t capacity) {
-    if (!tracker || capacity == 0) return ROOLE_ERR_INVALID;
+    if (!tracker || capacity == 0) return RESULT_ERR_INVALID;
     
     memset(tracker, 0, sizeof(execution_tracker_t));
     
-    tracker->records = roole_calloc(capacity, sizeof(execution_record_t));
+    tracker->records = safe_calloc(capacity, sizeof(execution_record_t));
     if (!tracker->records) {
-        return ROOLE_ERR_NOMEM;
+        return RESULT_ERR_NOMEM;
     }
     
     tracker->capacity = capacity;
     tracker->next_exec_id = 1;  // Start from 1 (0 = invalid)
     
     if (pthread_rwlock_init(&tracker->lock, NULL) != 0) {
-        roole_free(tracker->records);
-        return ROOLE_ERR_INVALID;
+        safe_free(tracker->records);
+        return RESULT_ERR_INVALID;
     }
     
-    ROOLE_LOG_INFO("Execution tracker initialized (capacity: %zu)", capacity);
-    return ROOLE_OK;
+    LOG_INFO("Execution tracker initialized (capacity: %zu)", capacity);
+    return RESULT_OK;
 }
 
 void execution_tracker_destroy(execution_tracker_t *tracker) {
@@ -36,17 +36,17 @@ void execution_tracker_destroy(execution_tracker_t *tracker) {
     
     pthread_rwlock_wrlock(&tracker->lock);
     
-    roole_free(tracker->records);
+    safe_free(tracker->records);
     tracker->records = NULL;
     tracker->capacity = 0;
     
     pthread_rwlock_unlock(&tracker->lock);
     pthread_rwlock_destroy(&tracker->lock);
     
-    ROOLE_LOG_INFO("Execution tracker destroyed");
+    LOG_INFO("Execution tracker destroyed");
 }
 
-execution_id_t execution_tracker_add(execution_tracker_t *tracker, dag_id_t dag_id,
+execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag_id,
                                     node_id_t worker_id, const uint8_t *message, 
                                     size_t message_len, uint8_t max_retries) {
     if (!tracker || !message || message_len == 0 || message_len > MAX_MESSAGE_SIZE) {
@@ -66,7 +66,7 @@ execution_id_t execution_tracker_add(execution_tracker_t *tracker, dag_id_t dag_
     
     if (slot == SIZE_MAX) {
         pthread_rwlock_unlock(&tracker->lock);
-        ROOLE_LOG_ERROR("Execution tracker full (capacity: %zu)", tracker->capacity);
+        LOG_ERROR("Execution tracker full (capacity: %zu)", tracker->capacity);
         return 0;
     }
     
@@ -81,7 +81,7 @@ execution_id_t execution_tracker_add(execution_tracker_t *tracker, dag_id_t dag_
     rec->dag_id = dag_id;
     rec->assigned_worker = worker_id;
     rec->status = EXEC_STATUS_PENDING;
-    rec->submit_time_ms = roole_time_now_ms();
+    rec->submit_time_ms = time_now_ms();
     rec->retry_count = 0;
     rec->max_retries = max_retries;
     rec->active = 1;
@@ -92,14 +92,14 @@ execution_id_t execution_tracker_add(execution_tracker_t *tracker, dag_id_t dag_
     
     pthread_rwlock_unlock(&tracker->lock);
     
-    ROOLE_LOG_INFO("Tracking execution %lu (DAG %u, worker %u)", 
+    LOG_INFO("Tracking execution %lu (DAG %u, worker %u)", 
                    exec_id, dag_id, worker_id);
     return exec_id;
 }
 
 int execution_tracker_update_status(execution_tracker_t *tracker, execution_id_t exec_id,
                                    execution_status_t status) {
-    if (!tracker || exec_id == 0) return ROOLE_ERR_INVALID;
+    if (!tracker || exec_id == 0) return RESULT_ERR_INVALID;
     
     pthread_rwlock_wrlock(&tracker->lock);
     
@@ -111,7 +111,7 @@ int execution_tracker_update_status(execution_tracker_t *tracker, execution_id_t
             rec->status = status;
             
             // Update timestamps
-            uint64_t now = roole_time_now_ms();
+            uint64_t now = time_now_ms();
             if (status == EXEC_STATUS_RUNNING && old_status == EXEC_STATUS_PENDING) {
                 rec->start_time_ms = now;
             }
@@ -121,14 +121,14 @@ int execution_tracker_update_status(execution_tracker_t *tracker, execution_id_t
             
             pthread_rwlock_unlock(&tracker->lock);
             
-            ROOLE_LOG_DEBUG("Execution %lu status: %d -> %d", exec_id, old_status, status);
-            return ROOLE_OK;
+            LOG_DEBUG("Execution %lu status: %d -> %d", exec_id, old_status, status);
+            return RESULT_OK;
         }
     }
     
     pthread_rwlock_unlock(&tracker->lock);
-    ROOLE_LOG_WARN("Execution %lu not found for status update", exec_id);
-    return ROOLE_ERR_NOTFOUND;
+    LOG_WARN("Execution %lu not found for status update", exec_id);
+    return RESULT_ERR_NOTFOUND;
 }
 
 execution_record_t* execution_tracker_get(execution_tracker_t *tracker, execution_id_t exec_id) {
@@ -175,7 +175,7 @@ size_t execution_tracker_get_by_worker(execution_tracker_t *tracker, node_id_t w
 }
 
 int execution_tracker_remove(execution_tracker_t *tracker, execution_id_t exec_id) {
-    if (!tracker || exec_id == 0) return ROOLE_ERR_INVALID;
+    if (!tracker || exec_id == 0) return RESULT_ERR_INVALID;
     
     pthread_rwlock_wrlock(&tracker->lock);
     
@@ -184,13 +184,13 @@ int execution_tracker_remove(execution_tracker_t *tracker, execution_id_t exec_i
             tracker->records[i].active = 0;
             
             pthread_rwlock_unlock(&tracker->lock);
-            ROOLE_LOG_DEBUG("Removed execution %lu from tracker", exec_id);
-            return ROOLE_OK;
+            LOG_DEBUG("Removed execution %lu from tracker", exec_id);
+            return RESULT_OK;
         }
     }
     
     pthread_rwlock_unlock(&tracker->lock);
-    return ROOLE_ERR_NOTFOUND;
+    return RESULT_ERR_NOTFOUND;
 }
 
 size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker) {
@@ -199,7 +199,7 @@ size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker) {
     pthread_rwlock_wrlock(&tracker->lock);
     
     size_t cleaned = 0;
-    uint64_t now = roole_time_now_ms();
+    uint64_t now = time_now_ms();
     
     // Remove executions completed/failed more than 5 minutes ago
     const uint64_t CLEANUP_THRESHOLD_MS = 5 * 60 * 1000;
@@ -221,7 +221,7 @@ size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker) {
     pthread_rwlock_unlock(&tracker->lock);
     
     if (cleaned > 0) {
-        ROOLE_LOG_INFO("Cleaned up %zu completed executions", cleaned);
+        LOG_INFO("Cleaned up %zu completed executions", cleaned);
     }
     
     return cleaned;

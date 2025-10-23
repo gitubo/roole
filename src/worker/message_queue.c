@@ -1,4 +1,4 @@
-// src/worker/task_queue.c
+// src/worker/message_queue.c
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -9,17 +9,17 @@
 #include <errno.h>
 
 // ============================================================================
-// TASK QUEUE IMPLEMENTATION (Thread-safe circular buffer)
+// message QUEUE IMPLEMENTATION (Thread-safe circular buffer)
 // ============================================================================
 
-int task_queue_init(task_queue_t *queue, size_t capacity) {
-    if (!queue || capacity == 0) return ROOLE_ERR_INVALID;
+int message_queue_init(message_queue_t *queue, size_t capacity) {
+    if (!queue || capacity == 0) return RESULT_ERR_INVALID;
     
-    memset(queue, 0, sizeof(task_queue_t));
+    memset(queue, 0, sizeof(message_queue_t));
     
-    queue->tasks = roole_calloc(capacity, sizeof(task_t));
-    if (!queue->tasks) {
-        return ROOLE_ERR_NOMEM;
+    queue->messages = safe_calloc(capacity, sizeof(message_t));
+    if (!queue->messages) {
+        return RESULT_ERR_NOMEM;
     }
     
     queue->capacity = capacity;
@@ -28,34 +28,34 @@ int task_queue_init(task_queue_t *queue, size_t capacity) {
     queue->count = 0;
     
     if (pthread_mutex_init(&queue->lock, NULL) != 0) {
-        roole_free(queue->tasks);
-        return ROOLE_ERR_INVALID;
+        safe_free(queue->messages);
+        return RESULT_ERR_INVALID;
     }
     
     if (pthread_cond_init(&queue->not_empty, NULL) != 0) {
         pthread_mutex_destroy(&queue->lock);
-        roole_free(queue->tasks);
-        return ROOLE_ERR_INVALID;
+        safe_free(queue->messages);
+        return RESULT_ERR_INVALID;
     }
     
     if (pthread_cond_init(&queue->not_full, NULL) != 0) {
         pthread_cond_destroy(&queue->not_empty);
         pthread_mutex_destroy(&queue->lock);
-        roole_free(queue->tasks);
-        return ROOLE_ERR_INVALID;
+        safe_free(queue->messages);
+        return RESULT_ERR_INVALID;
     }
     
-    ROOLE_LOG_INFO("Task queue initialized (capacity: %zu)", capacity);
-    return ROOLE_OK;
+    LOG_INFO("message queue initialized (capacity: %zu)", capacity);
+    return RESULT_OK;
 }
 
-void task_queue_destroy(task_queue_t *queue) {
+void message_queue_destroy(message_queue_t *queue) {
     if (!queue) return;
     
     pthread_mutex_lock(&queue->lock);
     
-    roole_free(queue->tasks);
-    queue->tasks = NULL;
+    safe_free(queue->messages);
+    queue->messages = NULL;
     queue->capacity = 0;
     queue->count = 0;
     
@@ -65,22 +65,22 @@ void task_queue_destroy(task_queue_t *queue) {
     pthread_cond_destroy(&queue->not_empty);
     pthread_mutex_destroy(&queue->lock);
     
-    ROOLE_LOG_INFO("Task queue destroyed");
+    LOG_INFO("message queue destroyed");
 }
 
-int task_queue_push(task_queue_t *queue, const task_t *task) {
-    if (!queue || !task) return ROOLE_ERR_INVALID;
+int message_queue_push(message_queue_t *queue, const message_t *message) {
+    if (!queue || !message) return RESULT_ERR_INVALID;
     
     pthread_mutex_lock(&queue->lock);
     
     // Wait if queue is full
     while (queue->count >= queue->capacity) {
-        ROOLE_LOG_WARN("Task queue full, waiting...");
+        LOG_WARN("message queue full, waiting...");
         pthread_cond_wait(&queue->not_full, &queue->lock);
     }
     
-    // Add task to tail
-    queue->tasks[queue->tail] = *task;
+    // Add message to tail
+    queue->messages[queue->tail] = *message;
     queue->tail = (queue->tail + 1) % queue->capacity;
     queue->count++;
     
@@ -89,12 +89,12 @@ int task_queue_push(task_queue_t *queue, const task_t *task) {
     // Signal that queue is not empty
     pthread_cond_signal(&queue->not_empty);
     
-    ROOLE_LOG_DEBUG("Task %lu enqueued (queue size: %zu)", task->exec_id, queue->count);
-    return ROOLE_OK;
+    LOG_DEBUG("message %lu enqueued (queue size: %zu)", message->exec_id, queue->count);
+    return RESULT_OK;
 }
 
-int task_queue_pop(task_queue_t *queue, task_t *out_task, int timeout_ms) {
-    if (!queue || !out_task) return ROOLE_ERR_INVALID;
+int message_queue_pop(message_queue_t *queue, message_t *out_message, int timeout_ms) {
+    if (!queue || !out_message) return RESULT_ERR_INVALID;
     
     pthread_mutex_lock(&queue->lock);
     
@@ -119,19 +119,19 @@ int task_queue_pop(task_queue_t *queue, task_t *out_task, int timeout_ms) {
             int ret = pthread_cond_timedwait(&queue->not_empty, &queue->lock, &ts);
             if (ret == ETIMEDOUT) {
                 pthread_mutex_unlock(&queue->lock);
-                return ROOLE_ERR_TIMEOUT;
+                return RESULT_ERR_TIMEOUT;
             }
         }
     } else {
         // Non-blocking
         if (queue->count == 0) {
             pthread_mutex_unlock(&queue->lock);
-            return ROOLE_ERR_EMPTY;
+            return RESULT_ERR_EMPTY;
         }
     }
     
-    // Pop task from head
-    *out_task = queue->tasks[queue->head];
+    // Pop message from head
+    *out_message = queue->messages[queue->head];
     queue->head = (queue->head + 1) % queue->capacity;
     queue->count--;
     
@@ -140,11 +140,11 @@ int task_queue_pop(task_queue_t *queue, task_t *out_task, int timeout_ms) {
     // Signal that queue is not full
     pthread_cond_signal(&queue->not_full);
     
-    ROOLE_LOG_DEBUG("Task %lu dequeued (queue size: %zu)", out_task->exec_id, queue->count);
-    return ROOLE_OK;
+    LOG_DEBUG("message %lu dequeued (queue size: %zu)", out_message->exec_id, queue->count);
+    return RESULT_OK;
 }
 
-size_t task_queue_size(task_queue_t *queue) {
+size_t message_queue_size(message_queue_t *queue) {
     if (!queue) return 0;
     
     pthread_mutex_lock(&queue->lock);
@@ -154,6 +154,6 @@ size_t task_queue_size(task_queue_t *queue) {
     return size;
 }
 
-int task_queue_is_empty(task_queue_t *queue) {
-    return (task_queue_size(queue) == 0);
+int message_queue_is_empty(message_queue_t *queue) {
+    return (message_queue_size(queue) == 0);
 }

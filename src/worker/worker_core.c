@@ -41,84 +41,74 @@ static void on_member_event(node_id_t node_id, node_type_t type,
 void* worker_executor_thread_fn(void *arg) {
     worker_state_t *worker = (worker_state_t*)arg;
     
-    ROOLE_LOG_INFO("Worker executor thread started");
+    LOG_INFO("Worker executor thread started");
     
     while (!worker->shutdown_flag) {
-        task_t task;
+        message_t message; 
         
-        // Pop task from queue (blocking, 1 second timeout)
-        int ret = task_queue_pop(&worker->task_queue, &task, 1000);
+        // Pop message from queue (blocking, 1 second timeout)
+        int ret = message_queue_pop(&worker->message_queue, &message, 1000);  // CHANGED
         
-        if (ret == ROOLE_ERR_TIMEOUT || ret == ROOLE_ERR_EMPTY) {
-            continue;  // No task available, retry
-        }
-        
-        if (ret != ROOLE_OK) {
-            ROOLE_LOG_ERROR("Failed to pop task from queue");
+        if (ret == RESULT_ERR_TIMEOUT || ret == RESULT_ERR_EMPTY) {
             continue;
         }
         
-        ROOLE_LOG_INFO("Executing task %lu (DAG %u)", task.exec_id, task.dag_id);
+        if (ret != RESULT_OK) {
+            LOG_ERROR("Failed to pop message from queue");
+            continue;
+        }
         
-        // Increment active executions
+        LOG_INFO("Processing message %lu (DAG %u)", message.exec_id, message.dag_id);
+        
         __sync_fetch_and_add(&worker->active_executions, 1);
         
-        // Get DAG from catalog
-        dag_t *dag = dag_catalog_get(&worker->dag_catalog, task.dag_id);
-        if (!dag) {
-            ROOLE_LOG_ERROR("DAG %u not found in worker catalog", task.dag_id);
-            worker_send_execution_update(worker, task.router_id, 
-                                        task.exec_id, EXEC_STATUS_FAILED);
-            __sync_fetch_and_sub(&worker->active_executions, 1);
-            continue;
+        // COMMENT: Simple 500ms processing simulation
+        usleep(500000);  // 500ms
+        
+        // COMMENT: Send success status back to router
+        execution_status_t status = EXEC_STATUS_COMPLETED;
+        
+        // Find router connection (use first active router)
+        pthread_mutex_lock(&worker->routers_lock);
+        router_connection_t *router_conn = NULL;
+        for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
+            if (worker->routers[i].active) {
+                router_conn = &worker->routers[i];
+                break;
+            }
         }
         
-        // Execute DAG
-        dag_execution_context_t ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        
-        ctx.exec_id = task.exec_id;
-        ctx.dag = dag;
-        ctx.input_data = task.message_data;
-        ctx.input_len = task.message_len;
-        
-        // Allocate output buffer
-        ctx.output_capacity = MAX_MESSAGE_SIZE;
-        ctx.output_data = roole_malloc(ctx.output_capacity);
-        
-        struct timespec start_time;
-        roole_timespec_now(&start_time);
-        
-        int exec_result = dag_execute(&ctx);
-        
-        struct timespec end_time;
-        roole_timespec_now(&end_time);
-        double exec_time_us = roole_time_diff_us(&start_time, &end_time);
-        
-        dag_catalog_release(&worker->dag_catalog);
-        
-        // Send result to router
-        execution_status_t status = (exec_result == ROOLE_OK) ? 
-                                    EXEC_STATUS_COMPLETED : EXEC_STATUS_FAILED;
-        
-        worker_send_execution_update(worker, task.router_id, task.exec_id, status);
-        
-        if (status == EXEC_STATUS_COMPLETED) {
-            ROOLE_LOG_INFO("Task %lu completed in %.2f us", task.exec_id, exec_time_us);
+        if (router_conn && router_conn->data_channel) {
+            // Build status update payload: [exec_id: 8][status: 1]
+            uint8_t payload[9];
+            memcpy(payload, &message.exec_id, 8);
+            payload[8] = (uint8_t)status;
+            
+            // Pack and send via DATA channel
+            size_t msg_len = rpc_pack_message(
+                router_conn->data_channel->tx_buffer,
+                worker->worker_id,
+                message.exec_id,
+                RPC_TYPE_REQUEST,
+                RPC_STATUS_UNKNOWN,
+                FUNC_ID_EXECUTION_UPDATE,
+                payload,
+                9
+            );
+            
+            send(router_conn->data_channel->socket_fd,
+                router_conn->data_channel->tx_buffer, msg_len, 0);
+            
+            LOG_INFO("Message %lu completed (500ms processing)", message.exec_id);
         } else {
-            ROOLE_LOG_ERROR("Task %lu failed", task.exec_id);
+            LOG_ERROR("No router connection available for status update");
         }
+        pthread_mutex_unlock(&worker->routers_lock);
         
-        // Cleanup
-        if (ctx.output_data) {
-            roole_free(ctx.output_data);
-        }
-        
-        // Decrement active executions
         __sync_fetch_and_sub(&worker->active_executions, 1);
     }
     
-    ROOLE_LOG_INFO("Worker executor thread stopped");
+    LOG_INFO("Worker executor thread stopped");
     return NULL;
 }
 
@@ -129,7 +119,7 @@ void* worker_executor_thread_fn(void *arg) {
 static void* worker_heartbeat_thread_fn(void *arg) {
     worker_state_t *worker = (worker_state_t*)arg;
     
-    ROOLE_LOG_INFO("Worker heartbeat thread started");
+    LOG_INFO("Worker heartbeat thread started");
     
     while (!worker->shutdown_flag) {
         usleep(DEFAULT_HEARTBEAT_INTERVAL_MS * 1000);
@@ -137,7 +127,7 @@ static void* worker_heartbeat_thread_fn(void *arg) {
         worker_send_heartbeat(worker);
     }
     
-    ROOLE_LOG_INFO("Worker heartbeat thread stopped");
+    LOG_INFO("Worker heartbeat thread stopped");
     return NULL;
 }
 
@@ -149,7 +139,7 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
                uint16_t service_port, uint16_t data_port,
                size_t num_executor_threads) {
     if (!worker || num_executor_threads == 0 || num_executor_threads > 16) {
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
 
     memset(worker, 0, sizeof(worker_state_t));
@@ -162,33 +152,33 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     worker->catalog_version = 0;
     
     // Initialize DAG catalog
-    if (dag_catalog_init(&worker->dag_catalog, MAX_DAGS) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to initialize DAG catalog");
-        return ROOLE_ERR_INVALID;
+    if (dag_catalog_init(&worker->dag_catalog, MAX_DAGS) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize DAG catalog");
+        return RESULT_ERR_INVALID;
     }
     
-    // Initialize task queue
-    if (task_queue_init(&worker->task_queue, MAX_WORKER_QUEUE_SIZE) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to initialize task queue");
+    // Initialize message queue
+    if (message_queue_init(&worker->message_queue, MAX_WORKER_QUEUE_SIZE) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize message queue");
         dag_catalog_destroy(&worker->dag_catalog);
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
     
     // Initialize cluster view
-    if (cluster_view_init(&worker->cluster_view, MAX_CLUSTER_NODES) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to initialize cluster view");
-        task_queue_destroy(&worker->task_queue);
+    if (cluster_view_init(&worker->cluster_view, MAX_CLUSTER_NODES) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize cluster view");
+        message_queue_destroy(&worker->message_queue);
         dag_catalog_destroy(&worker->dag_catalog);
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
     
     // Initialize routers lock
     if (pthread_mutex_init(&worker->routers_lock, NULL) != 0) {
-        ROOLE_LOG_ERROR("Failed to initialize routers lock");
+        LOG_ERROR("Failed to initialize routers lock");
         cluster_view_destroy(&worker->cluster_view);
-        task_queue_destroy(&worker->task_queue);
+        message_queue_destroy(&worker->message_queue);
         dag_catalog_destroy(&worker->dag_catalog);
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
     
     // Initialize membership
@@ -196,63 +186,63 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     snprintf(bind_addr, sizeof(bind_addr), "0.0.0.0");
 
     if (membership_init(&worker->membership, worker_id, NODE_TYPE_WORKER,
-                       bind_addr, service_port + 1000) != ROOLE_OK) {
-        ROOLE_LOG_ERROR("Failed to initialize membership");
+                       bind_addr, service_port + 1000) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize membership");
         pthread_mutex_destroy(&worker->routers_lock);
         cluster_view_destroy(&worker->cluster_view);
-        task_queue_destroy(&worker->task_queue);
+        message_queue_destroy(&worker->message_queue);
         dag_catalog_destroy(&worker->dag_catalog);
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
 
     membership_set_callback(worker->membership, on_member_event, worker);
 
-    ROOLE_LOG_INFO("Worker %u initialized (SERVICE:%u, DATA:%u, %zu executor threads)",
+    LOG_INFO("Worker %u initialized (SERVICE:%u, DATA:%u, %zu executor threads)",
                    worker_id, service_port, data_port, num_executor_threads);
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 int worker_start(worker_state_t *worker) {
-    if (!worker) return ROOLE_ERR_INVALID;
+    if (!worker) return RESULT_ERR_INVALID;
     
     // Start executor threads
     for (size_t i = 0; i < worker->num_executor_threads; i++) {
         if (pthread_create(&worker->executor_threads[i], NULL, 
                           worker_executor_thread_fn, worker) != 0) {
-            ROOLE_LOG_ERROR("Failed to start executor thread %zu", i);
+            LOG_ERROR("Failed to start executor thread %zu", i);
             
             // Stop already started threads
             worker->shutdown_flag = 1;
             for (size_t j = 0; j < i; j++) {
                 pthread_join(worker->executor_threads[j], NULL);
             }
-            return ROOLE_ERR_INVALID;
+            return RESULT_ERR_INVALID;
         }
     }
     
     // Start heartbeat thread
     if (pthread_create(&worker->heartbeat_thread, NULL, 
                       worker_heartbeat_thread_fn, worker) != 0) {
-        ROOLE_LOG_ERROR("Failed to start heartbeat thread");
+        LOG_ERROR("Failed to start heartbeat thread");
         
         worker->shutdown_flag = 1;
         for (size_t i = 0; i < worker->num_executor_threads; i++) {
             pthread_join(worker->executor_threads[i], NULL);
         }
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
     
-    // TODO: Start RPC worker for receiving tasks from routers
+    // TODO: Start RPC worker for receiving messages from routers
     // rpc_worker_run(worker->port, worker_rpc_service_table);
     
-    ROOLE_LOG_INFO("Worker %u started", worker->worker_id);
-    return ROOLE_OK;
+    LOG_INFO("Worker %u started", worker->worker_id);
+    return RESULT_OK;
 }
 
 void worker_shutdown(worker_state_t *worker) {
     if (!worker) return;
     
-    ROOLE_LOG_INFO("Shutting down worker %u", worker->worker_id);
+    LOG_INFO("Shutting down worker %u", worker->worker_id);
     
     worker->shutdown_flag = 1;
     
@@ -271,21 +261,42 @@ void worker_shutdown(worker_state_t *worker) {
     
     pthread_mutex_destroy(&worker->routers_lock);
     cluster_view_destroy(&worker->cluster_view);
-    task_queue_destroy(&worker->task_queue);
+    message_queue_destroy(&worker->message_queue);
     dag_catalog_destroy(&worker->dag_catalog);
     
-    ROOLE_LOG_INFO("Worker %u shutdown complete", worker->worker_id);
+    LOG_INFO("Worker %u shutdown complete", worker->worker_id);
+}
+
+int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
+                          rule_id_t dag_id, node_id_t sender_id,
+                          const uint8_t *message_data, size_t message_len) {
+    if (!worker || !message_data || message_len == 0 || message_len > MAX_MESSAGE_SIZE) {
+        return RESULT_ERR_INVALID;
+    }
+    
+    message_t message;
+    memset(&message, 0, sizeof(message));
+    
+    message.exec_id = exec_id;
+    message.dag_id = dag_id;
+    message.sender_id = sender_id;
+    message.received_at_ms = time_now_ms();
+    
+    memcpy(message.message_data, message_data, message_len);
+    message.message_len = message_len;
+    
+    return message_queue_push(&worker->message_queue, &message);
 }
 
 // ============================================================================
-// TASK MANAGEMENT
+// message MANAGEMENT
 // ============================================================================
-
+/*
 int worker_enqueue_task(worker_state_t *worker, execution_id_t exec_id,
-                       dag_id_t dag_id, node_id_t router_id,
+                       rule_id_t dag_id, node_id_t router_id,
                        const uint8_t *message, size_t message_len) {
     if (!worker || !message || message_len == 0 || message_len > MAX_MESSAGE_SIZE) {
-        return ROOLE_ERR_INVALID;
+        return RESULT_ERR_INVALID;
     }
     
     task_t task;
@@ -294,21 +305,21 @@ int worker_enqueue_task(worker_state_t *worker, execution_id_t exec_id,
     task.exec_id = exec_id;
     task.dag_id = dag_id;
     task.router_id = router_id;
-    task.received_at_ms = roole_time_now_ms();
+    task.received_at_ms = time_now_ms();
     
     memcpy(task.message_data, message, message_len);
     task.message_len = message_len;
     
     return task_queue_push(&worker->task_queue, &task);
 }
-
+*/
 // ============================================================================
 // ROUTER MANAGEMENT
 // ============================================================================
 
 int worker_add_router(worker_state_t *worker, node_id_t router_id,
                      const char *ip, uint16_t service_port, uint16_t data_port) {
-    if (!worker || !ip) return ROOLE_ERR_INVALID;
+    if (!worker || !ip) return RESULT_ERR_INVALID;
 
     pthread_mutex_lock(&worker->routers_lock);
 
@@ -316,8 +327,8 @@ int worker_add_router(worker_state_t *worker, node_id_t router_id,
     for (size_t i = 0; i < worker->router_count; i++) {
         if (worker->routers[i].active && worker->routers[i].router_id == router_id) {
             pthread_mutex_unlock(&worker->routers_lock);
-            ROOLE_LOG_DEBUG("Router %u already connected", router_id);
-            return ROOLE_OK;
+            LOG_DEBUG("Router %u already connected", router_id);
+            return RESULT_OK;
         }
     }
 
@@ -332,57 +343,57 @@ int worker_add_router(worker_state_t *worker, node_id_t router_id,
 
     if (slot == SIZE_MAX) {
         pthread_mutex_unlock(&worker->routers_lock);
-        ROOLE_LOG_ERROR("Maximum router connections reached");
-        return ROOLE_ERR_FULL;
+        LOG_ERROR("Maximum router connections reached");
+        return RESULT_ERR_FULL;
     }
 
     router_connection_t *conn = &worker->routers[slot];
     memset(conn, 0, sizeof(router_connection_t));
 
     conn->router_id = router_id;
-    roole_strncpy_safe(conn->ip, ip, MAX_IP_LEN);
+    safe_strncpy(conn->ip, ip, MAX_IP_LEN);
     conn->service_port = service_port;
     conn->data_port = data_port;
-    conn->last_sync_ms = roole_time_now_ms();
+    conn->last_sync_ms = time_now_ms();
     conn->active = 1;
 
     // Initialize RPC channels to router (SERVICE and DATA)
-    conn->service_channel = roole_malloc(sizeof(rpc_channel_t));
-    conn->data_channel = roole_malloc(sizeof(rpc_channel_t));
+    conn->service_channel = safe_malloc(sizeof(rpc_channel_t));
+    conn->data_channel = safe_malloc(sizeof(rpc_channel_t));
 
     if (!conn->service_channel || !conn->data_channel) {
-        ROOLE_LOG_ERROR("Failed to allocate RPC channels");
-        if (conn->service_channel) roole_free(conn->service_channel);
-        if (conn->data_channel) roole_free(conn->data_channel);
+        LOG_ERROR("Failed to allocate RPC channels");
+        if (conn->service_channel) safe_free(conn->service_channel);
+        if (conn->data_channel) safe_free(conn->data_channel);
         pthread_mutex_unlock(&worker->routers_lock);
-        return ROOLE_ERR_NOMEM;
+        return RESULT_ERR_NOMEM;
     }
 
     // Connect SERVICE channel
     if (rpc_client_connect(conn->service_channel, ip, service_port,
                           RPC_CHANNEL_SERVICE, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to connect SERVICE channel to router %u", router_id);
-        roole_free(conn->service_channel);
-        roole_free(conn->data_channel);
+        LOG_ERROR("Failed to connect SERVICE channel to router %u", router_id);
+        safe_free(conn->service_channel);
+        safe_free(conn->data_channel);
         conn->service_channel = NULL;
         conn->data_channel = NULL;
         conn->active = 0;
         pthread_mutex_unlock(&worker->routers_lock);
-        return ROOLE_ERR_NETWORK;
+        return RESULT_ERR_NETWORK;
     }
 
     // Connect DATA channel
     if (rpc_client_connect(conn->data_channel, ip, data_port,
                           RPC_CHANNEL_DATA, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to connect DATA channel to router %u", router_id);
+        LOG_ERROR("Failed to connect DATA channel to router %u", router_id);
         rpc_channel_destroy(conn->service_channel);
-        roole_free(conn->service_channel);
-        roole_free(conn->data_channel);
+        safe_free(conn->service_channel);
+        safe_free(conn->data_channel);
         conn->service_channel = NULL;
         conn->data_channel = NULL;
         conn->active = 0;
         pthread_mutex_unlock(&worker->routers_lock);
-        return ROOLE_ERR_NETWORK;
+        return RESULT_ERR_NETWORK;
     }
 
     if (slot >= worker->router_count) {
@@ -391,14 +402,14 @@ int worker_add_router(worker_state_t *worker, node_id_t router_id,
 
     pthread_mutex_unlock(&worker->routers_lock);
 
-    ROOLE_LOG_INFO("Connected to router %u (%s SERVICE:%u DATA:%u)",
+    LOG_INFO("Connected to router %u (%s SERVICE:%u DATA:%u)",
                    router_id, ip, service_port, data_port);
 
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 int worker_remove_router(worker_state_t *worker, node_id_t router_id) {
-    if (!worker) return ROOLE_ERR_INVALID;
+    if (!worker) return RESULT_ERR_INVALID;
 
     pthread_mutex_lock(&worker->routers_lock);
 
@@ -407,23 +418,23 @@ int worker_remove_router(worker_state_t *worker, node_id_t router_id) {
             // Close RPC channels (both service and data)
             if (worker->routers[i].service_channel) {
                 rpc_channel_destroy(worker->routers[i].service_channel);
-                roole_free(worker->routers[i].service_channel);
+                safe_free(worker->routers[i].service_channel);
             }
             if (worker->routers[i].data_channel) {
                 rpc_channel_destroy(worker->routers[i].data_channel);
-                roole_free(worker->routers[i].data_channel);
+                safe_free(worker->routers[i].data_channel);
             }
 
             worker->routers[i].active = 0;
 
             pthread_mutex_unlock(&worker->routers_lock);
-            ROOLE_LOG_INFO("Disconnected from router %u", router_id);
-            return ROOLE_OK;
+            LOG_INFO("Disconnected from router %u", router_id);
+            return RESULT_OK;
         }
     }
 
     pthread_mutex_unlock(&worker->routers_lock);
-    return ROOLE_ERR_NOTFOUND;
+    return RESULT_ERR_NOTFOUND;
 }
 
 // ============================================================================
@@ -431,7 +442,7 @@ int worker_remove_router(worker_state_t *worker, node_id_t router_id) {
 // ============================================================================
 
 int worker_send_heartbeat(worker_state_t *worker) {
-    if (!worker) return ROOLE_ERR_INVALID;
+    if (!worker) return RESULT_ERR_INVALID;
     
     pthread_mutex_lock(&worker->routers_lock);
     
@@ -445,7 +456,7 @@ int worker_send_heartbeat(worker_state_t *worker) {
             uint32_t active = worker->active_executions;
             float load = (float)active / (float)worker->num_executor_threads;
             
-            ROOLE_LOG_DEBUG("Heartbeat to router %u (active=%u, load=%.2f)", 
+            LOG_DEBUG("Heartbeat to router %u (active=%u, load=%.2f)", 
                            router_id, active, load);
 
             uint8_t payload[16];
@@ -467,30 +478,30 @@ int worker_send_heartbeat(worker_state_t *worker) {
 
             if (send(worker->routers[i].service_channel->socket_fd,
                     worker->routers[i].service_channel->tx_buffer, msg_len, 0) <= 0) {
-                ROOLE_LOG_ERROR("Failed to send heartbeat");
-                return ROOLE_ERR_NETWORK;
+                LOG_ERROR("Failed to send heartbeat");
+                return RESULT_ERR_NETWORK;
             }
         }
     }
     
     pthread_mutex_unlock(&worker->routers_lock);
     
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 int worker_register_with_router(worker_state_t *worker, const char *router_ip,
                                 uint16_t service_port, uint16_t data_port) {
-    if (!worker || !router_ip) return ROOLE_ERR_INVALID;
+    if (!worker || !router_ip) return RESULT_ERR_INVALID;
 
-    ROOLE_LOG_INFO("Registering with router at %s (SERVICE:%u DATA:%u)",
+    LOG_INFO("Registering with router at %s (SERVICE:%u DATA:%u)",
                    router_ip, service_port, data_port);
 
     // Connect to router's SERVICE channel for registration
     rpc_channel_t channel;
     if (rpc_client_connect(&channel, router_ip, service_port,
                           RPC_CHANNEL_SERVICE, 4096) != 0) {
-        ROOLE_LOG_ERROR("Failed to connect to router SERVICE channel for registration");
-        return ROOLE_ERR_NETWORK;
+        LOG_ERROR("Failed to connect to router SERVICE channel for registration");
+        return RESULT_ERR_NETWORK;
     }
 
     // Build registration payload: [worker_id][service_port][data_port]
@@ -512,39 +523,39 @@ int worker_register_with_router(worker_state_t *worker, const char *router_ip,
     );
     
     if (send(channel.socket_fd, channel.tx_buffer, msg_len, 0) <= 0) {
-        ROOLE_LOG_ERROR("Failed to send registration");
+        LOG_ERROR("Failed to send registration");
         rpc_channel_destroy(&channel);
-        return ROOLE_ERR_NETWORK;
+        return RESULT_ERR_NETWORK;
     }
     
     // Wait for ACK
     rpc_header_t resp_header;
     if (recv(channel.socket_fd, channel.rx_buffer, RPC_HEADER_SIZE, 0) <= 0) {
-        ROOLE_LOG_ERROR("Failed to receive registration ACK");
+        LOG_ERROR("Failed to receive registration ACK");
         rpc_channel_destroy(&channel);
-        return ROOLE_ERR_NETWORK;
+        return RESULT_ERR_NETWORK;
     }
     
     rpc_unpack_header(channel.rx_buffer, &resp_header);
     
     if (resp_header.type_and_status.fields.status == RPC_STATUS_SUCCESS) {
-        ROOLE_LOG_INFO("Successfully registered with router");
+        LOG_INFO("Successfully registered with router");
 
         // Add router to connections (using the same ports we just connected to)
         worker_add_router(worker, 1, router_ip, service_port, data_port);
 
         rpc_channel_destroy(&channel);
-        return ROOLE_OK;
+        return RESULT_OK;
     }
     
-    ROOLE_LOG_ERROR("Registration failed");
+    LOG_ERROR("Registration failed");
     rpc_channel_destroy(&channel);
-    return ROOLE_ERR_INVALID;
+    return RESULT_ERR_INVALID;
 }
 
 int worker_send_execution_update(worker_state_t *worker, node_id_t router_id,
                                 execution_id_t exec_id, execution_status_t status) {
-    if (!worker || exec_id == 0) return ROOLE_ERR_INVALID;
+    if (!worker || exec_id == 0) return RESULT_ERR_INVALID;
     
     pthread_mutex_lock(&worker->routers_lock);
     
@@ -559,32 +570,32 @@ int worker_send_execution_update(worker_state_t *worker, node_id_t router_id,
     pthread_mutex_unlock(&worker->routers_lock);
     
     if (!conn) {
-        ROOLE_LOG_WARN("Router %u not found for execution update", router_id);
-        return ROOLE_ERR_NOTFOUND;
+        LOG_WARN("Router %u not found for execution update", router_id);
+        return RESULT_ERR_NOTFOUND;
     }
     
     // TODO: Send execution status via RPC
     // Payload: exec_id, status
     
-    ROOLE_LOG_DEBUG("Execution update to router %u: exec %lu -> status %d", 
+    LOG_DEBUG("Execution update to router %u: exec %lu -> status %d", 
                    router_id, exec_id, status);
     
     // TODO: Actual RPC call
     // rpc_pack_message(..., FUNC_ID_EXECUTION_UPDATE, ...);
     
-    return ROOLE_OK;
+    return RESULT_OK;
 }
 
 int worker_sync_catalog_from_router(worker_state_t *worker, node_id_t router_id) {
-    if (!worker) return ROOLE_ERR_INVALID;
+    if (!worker) return RESULT_ERR_INVALID;
     
     // TODO: Request full DAG catalog from router via RPC
     // This should be done periodically or when worker detects catalog is stale
     
-    ROOLE_LOG_INFO("Syncing DAG catalog from router %u", router_id);
+    LOG_INFO("Syncing DAG catalog from router %u", router_id);
     
     // TODO: Actual RPC call to fetch catalog
     // rpc_pack_message(..., FUNC_ID_SYNC_CATALOG, ...);
     
-    return ROOLE_OK;
+    return RESULT_OK;
 }

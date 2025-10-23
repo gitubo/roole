@@ -26,17 +26,17 @@ typedef enum {
     EXEC_STATUS_TIMEOUT = 5
 } execution_status_t;
 
-typedef struct task {
+typedef struct message {
     execution_id_t exec_id;
-    dag_id_t dag_id;
+    rule_id_t dag_id;
     uint8_t message_data[MAX_MESSAGE_SIZE];
     size_t message_len;
     uint64_t received_at_ms;
-    node_id_t router_id;  // Which router sent this
-} task_t;
+    node_id_t sender_id;  // Original sender (client or router)
+} message_t;
 
-typedef struct task_queue {
-    task_t *tasks;
+typedef struct message_queue {
+    message_t *messages;  // CHANGED: tasks -> messages
     size_t head;
     size_t tail;
     size_t capacity;
@@ -44,16 +44,16 @@ typedef struct task_queue {
     pthread_mutex_t lock;
     pthread_cond_t not_empty;
     pthread_cond_t not_full;
-} task_queue_t;
+} message_queue_t; 
 
-int task_queue_init(task_queue_t *queue, size_t capacity);
-void task_queue_destroy(task_queue_t *queue);
+int message_queue_init(message_queue_t *queue, size_t capacity);
+void message_queue_destroy(message_queue_t *queue);
 
-int task_queue_push(task_queue_t *queue, const task_t *task);
-int task_queue_pop(task_queue_t *queue, task_t *out_task, int timeout_ms);
+int message_queue_push(message_queue_t *queue, const message_t *message);
+int message_queue_pop(message_queue_t *queue, message_t *out_message, int timeout_ms);
 
-size_t task_queue_size(task_queue_t *queue);
-int task_queue_is_empty(task_queue_t *queue);
+size_t message_queue_size(message_queue_t *queue);
+int message_queue_is_empty(message_queue_t *queue);
 
 // ============================================================================
 // ROUTER CONNECTION (Worker maintains connections to routers)
@@ -89,7 +89,7 @@ typedef struct worker_state {
     uint64_t catalog_version;
 
     // Task execution
-    task_queue_t task_queue;
+    message_queue_t message_queue;
     uint32_t active_executions;
 
     // Router connections
@@ -121,10 +121,10 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
 int worker_start(worker_state_t *worker);
 void worker_shutdown(worker_state_t *worker);
 
-// Task management
-int worker_enqueue_task(worker_state_t *worker, execution_id_t exec_id,
-                       dag_id_t dag_id, node_id_t router_id,
-                       const uint8_t *message, size_t message_len);
+// Message management
+int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
+                          rule_id_t dag_id, node_id_t sender_id,
+                          const uint8_t *message, size_t message_len);
 
 // Router communication
 int worker_add_router(worker_state_t *worker, node_id_t router_id,
