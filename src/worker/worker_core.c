@@ -44,12 +44,15 @@ void* worker_executor_thread_fn(void *arg) {
     LOG_INFO("Worker executor thread started");
     
     while (!worker->shutdown_flag) {
-        message_t message; 
+        message_t message;
         
         // Pop message from queue (blocking, 1 second timeout)
-        int ret = message_queue_pop(&worker->message_queue, &message, 1000);  // CHANGED
+        int ret = message_queue_pop(&worker->message_queue, &message, 1000);
         
         if (ret == RESULT_ERR_TIMEOUT || ret == RESULT_ERR_EMPTY) {
+            // ADD: Update queue size metric
+            worker_metrics_set_queue_size(worker->metrics, 
+                                         message_queue_size(&worker->message_queue));
             continue;
         }
         
@@ -58,12 +61,29 @@ void* worker_executor_thread_fn(void *arg) {
             continue;
         }
         
+        // ADD: Calculate queue wait time
+        uint64_t now_ms = time_now_ms();
+        uint64_t wait_time_us = (now_ms - message.received_at_ms) * 1000;
+        worker_metrics_observe_queue_wait_time(worker->metrics, (double)wait_time_us);
+        
         LOG_INFO("Processing message %lu (DAG %u)", message.exec_id, message.dag_id);
         
         __sync_fetch_and_add(&worker->active_executions, 1);
         
+        // ADD: Update active executions metric
+        worker_metrics_set_active_executions(worker->metrics, worker->active_executions);
+        
+        // ADD: Track processing start time
+        struct timespec start_time;
+        timespec_now(&start_time);
+        
         // COMMENT: Simple 500ms processing simulation
         usleep(500000);  // 500ms
+        
+        // ADD: Calculate processing time
+        struct timespec end_time;
+        timespec_now(&end_time);
+        double processing_time_us = time_diff_us(&start_time, &end_time);
         
         // COMMENT: Send success status back to router
         execution_status_t status = EXEC_STATUS_COMPLETED;
@@ -99,13 +119,23 @@ void* worker_executor_thread_fn(void *arg) {
             send(router_conn->data_channel->socket_fd,
                 router_conn->data_channel->tx_buffer, msg_len, 0);
             
-            LOG_INFO("Message %lu completed (500ms processing)", message.exec_id);
+            LOG_INFO("Message %lu completed (%.2fms processing)", 
+                          message.exec_id, processing_time_us / 1000.0);
+            
+            // ADD: Record metrics
+            worker_metrics_observe_processing_time(worker->metrics, processing_time_us);
+            worker_metrics_inc_messages_processed(worker->metrics);
         } else {
             LOG_ERROR("No router connection available for status update");
+            // ADD: Record failure
+            worker_metrics_inc_messages_failed(worker->metrics);
         }
         pthread_mutex_unlock(&worker->routers_lock);
         
         __sync_fetch_and_sub(&worker->active_executions, 1);
+        
+        // ADD: Update active executions metric
+        worker_metrics_set_active_executions(worker->metrics, worker->active_executions);
     }
     
     LOG_INFO("Worker executor thread stopped");
@@ -137,7 +167,7 @@ static void* worker_heartbeat_thread_fn(void *arg) {
 
 int worker_init(worker_state_t *worker, node_id_t worker_id,
                uint16_t service_port, uint16_t data_port,
-               size_t num_executor_threads) {
+               size_t num_executor_threads, uint16_t metrics_port) {
     if (!worker || num_executor_threads == 0 || num_executor_threads > 16) {
         return RESULT_ERR_INVALID;
     }
@@ -186,7 +216,7 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     snprintf(bind_addr, sizeof(bind_addr), "0.0.0.0");
 
     if (membership_init(&worker->membership, worker_id, NODE_TYPE_WORKER,
-                       bind_addr, service_port + 1000) != RESULT_OK) {
+                       bind_addr, service_port) != RESULT_OK) {
         LOG_ERROR("Failed to initialize membership");
         pthread_mutex_destroy(&worker->routers_lock);
         cluster_view_destroy(&worker->cluster_view);
@@ -196,6 +226,18 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     }
 
     membership_set_callback(worker->membership, on_member_event, worker);
+
+    // ADD THIS BLOCK:
+    // Initialize metrics (optional)
+    if (metrics_port > 0) {
+        worker->metrics = worker_metrics_init(worker_id, metrics_port);
+        if (!worker->metrics) {
+            LOG_WARN("WORKER", "Failed to initialize metrics (continuing without metrics)");
+        }
+    } else {
+        worker->metrics = NULL;
+        LOG_INFO("WORKER", "Metrics disabled (no metrics_port specified)");
+    }
 
     LOG_INFO("Worker %u initialized (SERVICE:%u, DATA:%u, %zu executor threads)",
                    worker_id, service_port, data_port, num_executor_threads);
@@ -264,6 +306,11 @@ void worker_shutdown(worker_state_t *worker) {
     message_queue_destroy(&worker->message_queue);
     dag_catalog_destroy(&worker->dag_catalog);
     
+    if (worker->metrics) {
+        worker_metrics_shutdown(worker->metrics);
+        worker->metrics = NULL;
+    }
+
     LOG_INFO("Worker %u shutdown complete", worker->worker_id);
 }
 

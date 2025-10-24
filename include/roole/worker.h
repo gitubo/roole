@@ -7,6 +7,7 @@
 #include "roole/dag.h"
 #include "roole/cluster.h"
 #include "roole/rpc.h"
+#include "roole/worker_metrics.h"
 #include <pthread.h>
 
 // ============================================================================
@@ -92,6 +93,9 @@ typedef struct worker_state {
     message_queue_t message_queue;
     uint32_t active_executions;
 
+    // Metrics (optional, NULL if disabled)
+    worker_metrics_t *metrics;
+
     // Router connections
     router_connection_t routers[MAX_ROUTER_CONNECTIONS];
     size_t router_count;
@@ -117,7 +121,7 @@ typedef struct worker_state {
 // Initialization
 int worker_init(worker_state_t *worker, node_id_t worker_id,
                uint16_t service_port, uint16_t data_port,
-               size_t num_executor_threads);
+               size_t num_executor_threads, uint16_t metrics_port);
 int worker_start(worker_state_t *worker);
 void worker_shutdown(worker_state_t *worker);
 

@@ -148,7 +148,7 @@ int router_init(router_state_t *router, node_id_t router_id,
     snprintf(bind_addr, sizeof(bind_addr), "0.0.0.0");
 
     if (membership_init(&router->membership, router_id, NODE_TYPE_ROUTER,
-                       bind_addr, service_port + 1000) != RESULT_OK) {
+                       bind_addr, service_port) != RESULT_OK) {
         LOG_ERROR("Failed to initialize membership");
         heartbeat_tracker_destroy(router->heartbeat_tracker);
         cluster_view_destroy(&router->cluster_view);

@@ -5,6 +5,7 @@
 
 #include "roole/cluster.h"
 #include "roole/common.h"
+#include "roole/gossip.h" 
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -210,36 +211,16 @@ struct membership_handle {
     node_type_t my_type;
     char bind_addr[MAX_IP_LEN];
     uint16_t bind_port;
+    uint16_t service_port;
     
     cluster_view_t internal_view;
     
     member_event_cb event_callback;
     void *event_callback_user_data;
     
-    pthread_t gossip_thread;
+    gossip_engine_t *gossip_engine;
     int shutdown_flag;
 };
-
-static void* membership_gossip_thread(void *arg) {
-    membership_handle_t *handle = (membership_handle_t*)arg;
-    
-    LOG_INFO("Membership gossip thread started");
-    
-    while (!handle->shutdown_flag) {
-        usleep(GOSSIP_INTERVAL_MS * 1000);
-        
-        // TODO: Implement actual gossip protocol
-        // 1. Select random GOSSIP_FANOUT members
-        // 2. Send our view + ping
-        // 3. Merge received view
-        // 4. Detect failures (increment suspicion)
-        
-        LOG_DEBUG("Gossip tick");
-    }
-    
-    LOG_INFO("Membership gossip thread stopped");
-    return NULL;
-}
 
 int membership_init(membership_handle_t **handle, node_id_t my_id, 
                    node_type_t my_type, const char *bind_addr, uint16_t bind_port) {
@@ -252,6 +233,7 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
     h->my_type = my_type;
     safe_strncpy(h->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
     h->bind_port = bind_port;
+    h->service_port = bind_port;  // Assume bind_port is service port
     h->shutdown_flag = 0;
     
     if (cluster_view_init(&h->internal_view, MAX_GOSSIP_MEMBERS) != RESULT_OK) {
@@ -265,45 +247,69 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
         .node_type = my_type,
         .port = bind_port,
         .status = NODE_STATUS_ALIVE,
-        .incarnation = 0
+        .incarnation = 0,
+        .last_seen_ms = time_now_ms()
     };
     safe_strncpy(self.ip_address, h->bind_addr, MAX_IP_LEN);
     cluster_view_add(&h->internal_view, &self);
     
-    // Start gossip thread
-    if (pthread_create(&h->gossip_thread, NULL, membership_gossip_thread, h) != 0) {
+    // Initialize SWIM gossip engine
+    uint16_t gossip_port = bind_port + 1000;  // Gossip on service_port + 1000
+    
+    gossip_config_t gossip_config = gossip_default_config();
+    
+    h->gossip_engine = gossip_engine_init(
+        my_id,
+        my_type,
+        h->bind_addr,
+        gossip_port,
+        bind_port,
+        &gossip_config,
+        &h->internal_view,
+        NULL,  // Event callback set separately
+        NULL
+    );
+    
+    if (!h->gossip_engine) {
+        LOG_ERROR("Failed to initialize gossip engine");
+        cluster_view_destroy(&h->internal_view);
+        safe_free(h);
+        return RESULT_ERR_INVALID;
+    }
+    
+    // Start gossip engine
+    if (gossip_engine_start(h->gossip_engine) != 0) {
+        LOG_ERROR("Failed to start gossip engine");
+        gossip_engine_shutdown(h->gossip_engine);
         cluster_view_destroy(&h->internal_view);
         safe_free(h);
         return RESULT_ERR_INVALID;
     }
     
     *handle = h;
-    LOG_INFO("Membership initialized (node_id=%u, type=%d, port=%u)", 
-                   my_id, my_type, bind_port);
+    LOG_INFO("Membership initialized (node_id=%u, type=%d, gossip_port=%u)", 
+             my_id, my_type, gossip_port);
     return RESULT_OK;
 }
 
 int membership_join(membership_handle_t *handle, const char *seed_addr, uint16_t seed_port) {
     if (!handle || !seed_addr) return RESULT_ERR_INVALID;
     
-    // TODO: Implement join protocol
-    // 1. Connect to seed node
-    // 2. Send JOIN message with our info
-    // 3. Receive member list
-    // 4. Add to internal view
-    
     LOG_INFO("Joining cluster via seed %s:%u", seed_addr, seed_port);
     
-    // Placeholder: add seed as a member
-    cluster_member_t seed = {
-        .node_id = 0, // Unknown yet
-        .node_type = NODE_TYPE_UNKNOWN,
-        .port = seed_port,
-        .status = NODE_STATUS_ALIVE,
-        .incarnation = 0
-    };
-    safe_strncpy(seed.ip_address, seed_addr, MAX_IP_LEN);
+    // Calculate seed's gossip port (assume same offset)
+    uint16_t seed_gossip_port = seed_port + 1000;
     
+    // Send JOIN to seed via gossip engine
+    if (gossip_engine_add_seed(handle->gossip_engine, seed_addr, seed_gossip_port) != 0) {
+        LOG_ERROR("Failed to send JOIN to seed");
+        return RESULT_ERR_NETWORK;
+    }
+    
+    // Announce our join to the cluster
+    gossip_engine_announce_join(handle->gossip_engine);
+    
+    LOG_INFO("JOIN sent to seed, waiting for cluster view to populate...");
     return RESULT_OK;
 }
 
@@ -313,14 +319,26 @@ int membership_set_callback(membership_handle_t *handle, member_event_cb callbac
     handle->event_callback = callback;
     handle->event_callback_user_data = user_data;
     
+    // Forward callback to gossip engine
+    if (handle->gossip_engine) {
+        gossip_engine_set_callback(handle->gossip_engine, callback, user_data);
+    }
+    
     return RESULT_OK;
 }
 
 int membership_leave(membership_handle_t *handle) {
     if (!handle) return RESULT_ERR_INVALID;
     
-    // TODO: Send LEAVE message to all known members
-    LOG_INFO("Leaving cluster");
+    LOG_INFO("Gracefully leaving cluster");
+    
+    // Use gossip engine to announce LEAVE
+    if (handle->gossip_engine) {
+        gossip_engine_leave(handle->gossip_engine);
+    }
+    
+    // Give time for LEAVE messages to propagate
+    sleep(1);
     
     return RESULT_OK;
 }
@@ -329,7 +347,12 @@ void membership_shutdown(membership_handle_t *handle) {
     if (!handle) return;
     
     handle->shutdown_flag = 1;
-    pthread_join(handle->gossip_thread, NULL);
+    
+    // Shutdown gossip engine (also shuts down its threads)
+    if (handle->gossip_engine) {
+        gossip_engine_shutdown(handle->gossip_engine);
+        handle->gossip_engine = NULL;
+    }
     
     cluster_view_destroy(&handle->internal_view);
     safe_free(handle);
