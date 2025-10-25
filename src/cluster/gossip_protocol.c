@@ -164,3 +164,87 @@ int gossip_message_deserialize(const uint8_t *buffer, size_t buffer_size, gossip
     
     return 0;
 }
+
+// ============================================================================
+// BOOTSTRAP RESPONSE SERIALIZATION
+// ============================================================================
+
+ssize_t gossip_serialize_bootstrap_response(const gossip_bootstrap_response_t *resp, 
+                                            uint8_t *buffer, size_t buffer_size) {
+    if (!resp || !buffer || buffer_size < 1024) return -1;
+    
+    size_t offset = 0;
+    buffer[offset++] = resp->num_routers;
+    
+    for (uint8_t i = 0; i < resp->num_routers && i < MAX_CONFIG_ROUTERS; i++) {
+        // Check buffer space (2 + 64 + 64 = 130 bytes per router)
+        if (offset + 130 > buffer_size) {
+            LOG_WARN("Buffer too small for all routers, truncating");
+            break;
+        }
+        
+        // Node ID (2 bytes)
+        uint16_t node_id_net = htons(resp->routers[i].node_id);
+        memcpy(buffer + offset, &node_id_net, 2);
+        offset += 2;
+        
+        // Gossip address (64 bytes, null-terminated string)
+        memset(buffer + offset, 0, 64);
+        strncpy((char*)(buffer + offset), resp->routers[i].gossip_addr, 63);
+        offset += 64;
+        
+        // Data address (64 bytes, null-terminated string)
+        memset(buffer + offset, 0, 64);
+        strncpy((char*)(buffer + offset), resp->routers[i].data_addr, 63);
+        offset += 64;
+    }
+    
+    return (ssize_t)offset;
+}
+
+int gossip_deserialize_bootstrap_response(const uint8_t *buffer, size_t buffer_size,
+                                          gossip_bootstrap_response_t *resp) {
+    if (!buffer || !resp || buffer_size < 1) return -1;
+    
+    memset(resp, 0, sizeof(gossip_bootstrap_response_t));
+    
+    size_t offset = 0;
+    resp->num_routers = buffer[offset++];
+    
+    for (uint8_t i = 0; i < resp->num_routers && i < MAX_CONFIG_ROUTERS; i++) {
+        if (offset + 130 > buffer_size) {
+            LOG_WARN("Truncated bootstrap response, stopping at router %u", i);
+            resp->num_routers = i;
+            break;
+        }
+        
+        // Node ID
+        uint16_t node_id_net;
+        memcpy(&node_id_net, buffer + offset, 2);
+        resp->routers[i].node_id = ntohs(node_id_net);
+        offset += 2;
+        
+        // Gossip address
+        strncpy(resp->routers[i].gossip_addr, (char*)(buffer + offset), MAX_CONFIG_STRING - 1);
+        resp->routers[i].gossip_addr[MAX_CONFIG_STRING - 1] = '\0';
+        offset += 64;
+        
+        // Data address
+        strncpy(resp->routers[i].data_addr, (char*)(buffer + offset), MAX_CONFIG_STRING - 1);
+        resp->routers[i].data_addr[MAX_CONFIG_STRING - 1] = '\0';
+        offset += 64;
+    }
+    
+    return 0;
+}
+
+// ============================================================================
+// HELPER: Calculate serialized message size
+// ============================================================================
+
+size_t gossip_message_serialized_size(const gossip_message_t *msg) {
+    if (!msg) return 0;
+    
+    // Header (16 bytes) + updates (44 bytes each)
+    return 16 + (msg->num_updates * 44);
+}

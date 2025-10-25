@@ -76,14 +76,13 @@ typedef struct rpc_header {
 // ============================================================================
 
 typedef enum {
-    RPC_CHANNEL_SERVICE = 0,  // Heartbeat, registration, catalog sync, cluster management
     RPC_CHANNEL_DATA = 1,     // Message processing, execution updates
     RPC_CHANNEL_INGRESS = 2   // Client requests (Router only)
 } rpc_channel_type_t;
 
 // Channel type to function ID mapping helper
 // Returns the appropriate channel type for a given function ID
-rpc_channel_type_t rpc_get_channel_for_func(uint8_t func_id);
+//rpc_channel_type_t rpc_get_channel_for_func(uint8_t func_id);
 
 // ============================================================================
 // RPC CHANNEL (I/O Context)
@@ -199,22 +198,18 @@ int rpc_client_connect(rpc_channel_t *channel, const char *ip, uint16_t port,
 
 /**
  * @brief Start RPC worker event loop with dual channels (SERVICE + DATA)
- * @param service_port Port for SERVICE channel
  * @param data_port Port for DATA channel
  * @param service_table Service handler table
  */
-int rpc_worker_run(uint16_t service_port, uint16_t data_port,
-                   rpc_service_entry_t *service_table);
+int rpc_worker_run(uint16_t data_port, rpc_service_entry_t *service_table);
 
 /**
- * @brief Start RPC router event loop with three channels (SERVICE + DATA + INGRESS)
- * @param service_port Port for SERVICE channel (worker management)
+ * @brief Start RPC router event loop with three channels (DATA + INGRESS)
  * @param data_port Port for DATA channel (worker communication)
  * @param ingress_port Port for INGRESS channel (client requests)
  * @param service_table Service handler table
  */
-int rpc_router_run(uint16_t service_port, uint16_t data_port, uint16_t ingress_port,
-                   rpc_service_entry_t *service_table);
+int rpc_router_run( uint16_t data_port, uint16_t ingress_port, rpc_service_entry_t *service_table);
 
 /**
  * @brief Initialize multi-channel listener

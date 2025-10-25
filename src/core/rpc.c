@@ -48,7 +48,7 @@ static double time_diff_us(const struct timespec *start, const struct timespec *
 // ============================================================================
 // CHANNEL TYPE MAPPING
 // ============================================================================
-
+/*
 rpc_channel_type_t rpc_get_channel_for_func(uint8_t func_id) {
     // SERVICE channel: heartbeat, registration, catalog sync, cluster management
     if (func_id == FUNC_ID_WORKER_HEARTBEAT ||
@@ -80,7 +80,7 @@ rpc_channel_type_t rpc_get_channel_for_func(uint8_t func_id) {
     // Default to SERVICE for unknown functions
     return RPC_CHANNEL_SERVICE;
 }
-
+*/
 // ============================================================================
 // CHANNEL MANAGEMENT
 // ============================================================================
@@ -219,8 +219,7 @@ int rpc_client_connect(rpc_channel_t *channel, const char *ip, uint16_t port,
         return -1;
     }
 
-    const char *channel_name = (channel_type == RPC_CHANNEL_SERVICE) ? "SERVICE" :
-                               (channel_type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
+    const char *channel_name = (channel_type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
     LOG_INFO("RPC client connected to %s:%u (channel: %s)", ip, port, channel_name);
     return 0;
 }
@@ -313,8 +312,7 @@ int rpc_multi_listener_add(rpc_multi_channel_listener_t *listener,
     listener->listeners[listener->count].port = port;
     listener->count++;
 
-    const char *channel_name = (type == RPC_CHANNEL_SERVICE) ? "SERVICE" :
-                               (type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
+    const char *channel_name = (type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
     LOG_INFO("[RPC] Listening on port %u for %s channel", port, channel_name);
 
     return 0;
@@ -519,7 +517,7 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
 
         for (int i = 0; i < n; i++) {
             int is_listener = 0;
-            rpc_channel_type_t listener_type = RPC_CHANNEL_SERVICE;
+            rpc_channel_type_t listener_type = RPC_CHANNEL_DATA;
 
             // Check if this is a listener socket
             for (size_t j = 0; j < listener->count; j++) {
@@ -559,8 +557,7 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
                         continue;
                     }
 
-                    const char *channel_name = (listener_type == RPC_CHANNEL_SERVICE) ? "SERVICE" :
-                                               (listener_type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
+                    const char *channel_name = (listener_type == RPC_CHANNEL_DATA) ? "DATA" : "INGRESS";
                     LOG_DEBUG("[RPC] New connection on %s channel (FD %d)", channel_name, client_fd);
                 }
 
@@ -630,21 +627,13 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
 // WORKER EVENT LOOP (Two channels: SERVICE + DATA)
 // ============================================================================
 
-int rpc_worker_run(uint16_t service_port, uint16_t data_port,
-                   rpc_service_entry_t *service_table) {
+int rpc_worker_run(uint16_t data_port, rpc_service_entry_t *service_table) {
     rpc_multi_channel_listener_t listener;
 
-    LOG_INFO("[RPC] Worker starting with SERVICE port %u, DATA port %u",
-                   service_port, data_port);
+    LOG_INFO("[RPC] Worker starting with DATA port %u", data_port);
 
     if (rpc_multi_listener_init(&listener) != 0) {
         LOG_ERROR("Failed to initialize multi-channel listener");
-        return -1;
-    }
-
-    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_SERVICE, service_port) != 0) {
-        LOG_ERROR("Failed to add SERVICE listener");
-        rpc_multi_listener_destroy(&listener);
         return -1;
     }
 
@@ -664,21 +653,15 @@ int rpc_worker_run(uint16_t service_port, uint16_t data_port,
 // ROUTER EVENT LOOP (Three channels: SERVICE + DATA + INGRESS)
 // ============================================================================
 
-int rpc_router_run(uint16_t service_port, uint16_t data_port, uint16_t ingress_port,
+int rpc_router_run(uint16_t data_port, uint16_t ingress_port,
                    rpc_service_entry_t *service_table) {
     rpc_multi_channel_listener_t listener;
 
-    LOG_INFO("[RPC] Router starting with SERVICE port %u, DATA port %u, INGRESS port %u",
-                   service_port, data_port, ingress_port);
+    LOG_INFO("[RPC] Router starting with DATA port %u, INGRESS port %u",
+                   data_port, ingress_port);
 
     if (rpc_multi_listener_init(&listener) != 0) {
         LOG_ERROR("Failed to initialize multi-channel listener");
-        return -1;
-    }
-
-    if (rpc_multi_listener_add(&listener, RPC_CHANNEL_SERVICE, service_port) != 0) {
-        LOG_ERROR("Failed to add SERVICE listener");
-        rpc_multi_listener_destroy(&listener);
         return -1;
     }
 

@@ -29,6 +29,7 @@ include_directories(include)
 add_library(roole_core STATIC
     src/core/rpc.c
     src/core/common.c
+    src/core/config.c
 )
 target_link_libraries(roole_core pthread m)
 
@@ -46,7 +47,6 @@ target_link_libraries(roole_dag roole_core)
 # ============================================================================
 add_library(roole_cluster STATIC
     src/cluster/membership.c
-    src/cluster/failure_detector.c
     src/cluster/gossip_engine.c        
     src/cluster/gossip_protocol.c      
     src/cluster/gossip_transport.c     

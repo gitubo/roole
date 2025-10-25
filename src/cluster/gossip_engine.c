@@ -4,6 +4,8 @@
 
 #include "roole/gossip.h"
 #include "roole/common.h"
+#include "roole/config.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,14 +28,12 @@ ssize_t gossip_recv_udp(int sock_fd, uint8_t *buffer, size_t buffer_size,
 #define MAX_PENDING_ACKS 64
 #define MAX_UPDATE_QUEUE 256
 
-// Pending ACK tracking (for PING timeout detection)
 typedef struct pending_ack {
     node_id_t target_node;
     uint64_t ping_sent_ms;
     int active;
 } pending_ack_t;
 
-// Update queue (for piggybacking state changes)
 typedef struct update_queue {
     gossip_member_update_t updates[MAX_UPDATE_QUEUE];
     size_t head;
@@ -42,41 +42,32 @@ typedef struct update_queue {
     pthread_mutex_t lock;
 } update_queue_t;
 
-// Gossip engine state
 struct gossip_engine {
-    // Identity
     node_id_t my_id;
     node_type_t my_type;
     char my_ip[MAX_IP_LEN];
     uint16_t gossip_port;
     uint16_t service_port;
-    uint64_t incarnation;        // Our current incarnation number
-    uint64_t sequence_num;       // Message sequence counter
+    uint64_t incarnation;
+    uint64_t sequence_num;
     
-    // Configuration
     gossip_config_t config;
     
-    // Network
     int udp_socket;
     
-    // Shared cluster view
     cluster_view_t *cluster_view;
     
-    // Event callback
     member_event_cb event_callback;
     void *event_callback_data;
     
-    // Protocol state
     pending_ack_t pending_acks[MAX_PENDING_ACKS];
     pthread_mutex_t pending_acks_lock;
     
     update_queue_t update_queue;
     
-    // Threads
-    pthread_t protocol_thread;   // SWIM protocol loop
-    pthread_t listener_thread;   // UDP listener
+    pthread_t protocol_thread;
+    pthread_t listener_thread;
     
-    // Control
     int shutdown_flag;
 };
 
@@ -131,7 +122,6 @@ static int update_queue_pop_batch(update_queue_t *queue, gossip_member_update_t 
 static int add_pending_ack(gossip_engine_t *engine, node_id_t target_node) {
     pthread_mutex_lock(&engine->pending_acks_lock);
     
-    // Find free slot
     for (int i = 0; i < MAX_PENDING_ACKS; i++) {
         if (!engine->pending_acks[i].active) {
             engine->pending_acks[i].target_node = target_node;
@@ -179,11 +169,9 @@ static void check_ack_timeouts(gossip_engine_t *engine) {
             LOG_WARN("ACK timeout for node %u (no response after %lums)", 
                      node, elapsed);
             
-            // Mark as SUSPECT in cluster view
             cluster_view_update_status(engine->cluster_view, node, 
                                       NODE_STATUS_SUSPECT, 0);
             
-            // Add SUSPECT update to queue for propagation
             gossip_member_update_t update = {
                 .node_id = node,
                 .status = NODE_STATUS_SUSPECT,
@@ -191,7 +179,6 @@ static void check_ack_timeouts(gossip_engine_t *engine) {
             };
             update_queue_push(&engine->update_queue, &update);
             
-            // Remove from pending
             engine->pending_acks[i].active = 0;
         }
     }
@@ -237,21 +224,18 @@ gossip_engine_t* gossip_engine_init(
     engine->event_callback_data = user_data;
     engine->shutdown_flag = 0;
     
-    // Use provided config or defaults
     if (config) {
         engine->config = *config;
     } else {
         engine->config = gossip_default_config();
     }
     
-    // Initialize update queue
     if (update_queue_init(&engine->update_queue) != 0) {
         LOG_ERROR("Failed to initialize update queue");
         free(engine);
         return NULL;
     }
     
-    // Initialize pending ACKs lock
     if (pthread_mutex_init(&engine->pending_acks_lock, NULL) != 0) {
         LOG_ERROR("Failed to initialize pending ACKs lock");
         update_queue_destroy(&engine->update_queue);
@@ -259,7 +243,6 @@ gossip_engine_t* gossip_engine_init(
         return NULL;
     }
     
-    // Create UDP socket
     engine->udp_socket = gossip_create_udp_socket(bind_addr, gossip_port);
     if (engine->udp_socket < 0) {
         LOG_ERROR("Failed to create gossip UDP socket");
@@ -276,12 +259,9 @@ gossip_engine_t* gossip_engine_init(
 }
 
 // ============================================================================
-// MESSAGE HANDLING
+// MESSAGE HANDLERS
 // ============================================================================
 
-/**
- * Handle incoming PING message
- */
 static void handle_ping_message(gossip_engine_t *engine, 
                                const gossip_message_t *msg,
                                const char *src_ip, 
@@ -289,11 +269,10 @@ static void handle_ping_message(gossip_engine_t *engine,
     LOG_DEBUG("Received PING from node %u (%s:%u)", 
               msg->sender_id, src_ip, src_port);
     
-    // Process any piggyback updates
+    // Process piggyback updates
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
-        // Update cluster view
         cluster_member_t member = {
             .node_id = upd->node_id,
             .node_type = upd->node_type,
@@ -303,7 +282,6 @@ static void handle_ping_message(gossip_engine_t *engine,
         };
         safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
         
-        // Check if this is newer information
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
         if (existing) {
             if (upd->incarnation > existing->incarnation) {
@@ -313,7 +291,6 @@ static void handle_ping_message(gossip_engine_t *engine,
                 LOG_INFO("Updated node %u status to %d (incarnation %lu)",
                          upd->node_id, upd->status, upd->incarnation);
                 
-                // Trigger event callback if status changed
                 if (upd->status != existing->status && engine->event_callback) {
                     const char *event_type = NULL;
                     if (upd->status == NODE_STATUS_SUSPECT) {
@@ -333,7 +310,6 @@ static void handle_ping_message(gossip_engine_t *engine,
             }
             cluster_view_release(engine->cluster_view);
         } else {
-            // New member
             cluster_view_add(engine->cluster_view, &member);
             
             LOG_INFO("Discovered new member %u (%s:%u, type=%d)",
@@ -347,7 +323,7 @@ static void handle_ping_message(gossip_engine_t *engine,
         }
     }
     
-    // Send ACK response
+    // Send ACK
     gossip_message_t ack_msg = {
         .version = 1,
         .msg_type = GOSSIP_MSG_ACK,
@@ -357,25 +333,18 @@ static void handle_ping_message(gossip_engine_t *engine,
         .num_updates = 0
     };
     
-    // Piggyback some updates on ACK (if available)
     ack_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
                                                   ack_msg.updates,
                                                   GOSSIP_MAX_PIGGYBACK_UPDATES);
     
-    // Serialize and send
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
     ssize_t msg_size = gossip_message_serialize(&ack_msg, buffer, sizeof(buffer));
     if (msg_size > 0) {
         gossip_send_udp(engine->udp_socket, buffer, msg_size, src_ip, src_port);
         LOG_DEBUG("Sent ACK to node %u (%s:%u)", msg->sender_id, src_ip, src_port);
-    } else {
-        LOG_ERROR("Failed to serialize ACK message");
     }
 }
 
-/**
- * Handle incoming ACK message
- */
 static void handle_ack_message(gossip_engine_t *engine,
                               const gossip_message_t *msg,
                               const char *src_ip,
@@ -383,10 +352,8 @@ static void handle_ack_message(gossip_engine_t *engine,
     LOG_DEBUG("Received ACK from node %u (%s:%u)", 
               msg->sender_id, src_ip, src_port);
     
-    // Remove from pending ACKs (node is alive)
     remove_pending_ack(engine, msg->sender_id);
     
-    // Update node status to ALIVE if it was SUSPECT
     cluster_member_t *member = cluster_view_get(engine->cluster_view, msg->sender_id);
     if (member && member->status == NODE_STATUS_SUSPECT) {
         LOG_INFO("Node %u recovered (was SUSPECT, now ALIVE)", msg->sender_id);
@@ -420,9 +387,6 @@ static void handle_ack_message(gossip_engine_t *engine,
     }
 }
 
-/**
- * Handle incoming SUSPECT message
- */
 static void handle_suspect_message(gossip_engine_t *engine,
                                    const gossip_message_t *msg,
                                    const char *src_ip,
@@ -432,18 +396,15 @@ static void handle_suspect_message(gossip_engine_t *engine,
     
     LOG_DEBUG("Received SUSPECT from node %u", msg->sender_id);
     
-    // Process piggyback updates (which should contain the SUSPECT announcement)
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
         if (upd->node_id == engine->my_id && upd->status == NODE_STATUS_SUSPECT) {
-            // Someone suspects US! Refute by incrementing incarnation
             engine->incarnation++;
             
             LOG_WARN("Refuting suspicion (node %u suspected us), new incarnation=%lu",
                      msg->sender_id, engine->incarnation);
             
-            // Broadcast ALIVE message with new incarnation
             gossip_member_update_t alive_update = {
                 .node_id = engine->my_id,
                 .node_type = engine->my_type,
@@ -455,13 +416,11 @@ static void handle_suspect_message(gossip_engine_t *engine,
             };
             safe_strncpy(alive_update.ip_address, engine->my_ip, MAX_IP_LEN);
             
-            // Add to update queue with high priority (push to front conceptually)
-            for (int j = 0; j < 3; j++) {  // Add multiple times for faster propagation
+            for (int j = 0; j < 3; j++) {
                 update_queue_push(&engine->update_queue, &alive_update);
             }
             
         } else {
-            // Someone else is suspected
             cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
             if (existing) {
                 if (upd->incarnation >= existing->incarnation && 
@@ -473,7 +432,6 @@ static void handle_suspect_message(gossip_engine_t *engine,
                     LOG_INFO("Marking node %u as SUSPECT (based on gossip from %u)",
                              upd->node_id, msg->sender_id);
                     
-                    // Propagate this suspicion
                     update_queue_push(&engine->update_queue, upd);
                 }
                 cluster_view_release(engine->cluster_view);
@@ -482,9 +440,6 @@ static void handle_suspect_message(gossip_engine_t *engine,
     }
 }
 
-/**
- * Handle incoming ALIVE message (refutation)
- */
 static void handle_alive_message(gossip_engine_t *engine,
                                 const gossip_message_t *msg,
                                 const char *src_ip,
@@ -494,13 +449,11 @@ static void handle_alive_message(gossip_engine_t *engine,
     
     LOG_DEBUG("Received ALIVE from node %u", msg->sender_id);
     
-    // Process piggyback updates
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
         if (existing) {
-            // ALIVE refutation wins if incarnation is higher
             if (upd->incarnation > existing->incarnation) {
                 cluster_view_update_status(engine->cluster_view, upd->node_id,
                                           NODE_STATUS_ALIVE, upd->incarnation);
@@ -508,7 +461,6 @@ static void handle_alive_message(gossip_engine_t *engine,
                 LOG_INFO("Node %u refuted suspicion (new incarnation=%lu)",
                          upd->node_id, upd->incarnation);
                 
-                // Propagate the refutation
                 update_queue_push(&engine->update_queue, upd);
             }
             cluster_view_release(engine->cluster_view);
@@ -516,9 +468,6 @@ static void handle_alive_message(gossip_engine_t *engine,
     }
 }
 
-/**
- * Handle incoming DEAD message
- */
 static void handle_dead_message(gossip_engine_t *engine,
                                const gossip_message_t *msg,
                                const char *src_ip,
@@ -528,19 +477,16 @@ static void handle_dead_message(gossip_engine_t *engine,
     
     LOG_DEBUG("Received DEAD from node %u", msg->sender_id);
     
-    // Process piggyback updates
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
         if (existing) {
-            // Mark as DEAD
             cluster_view_update_status(engine->cluster_view, upd->node_id,
                                       NODE_STATUS_DEAD, upd->incarnation);
             
             LOG_INFO("Node %u marked as DEAD", upd->node_id);
             
-            // Trigger event callback
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
                                      upd->ip_address, upd->service_port,
@@ -552,9 +498,6 @@ static void handle_dead_message(gossip_engine_t *engine,
     }
 }
 
-/**
- * Handle incoming JOIN message
- */
 static void handle_join_message(gossip_engine_t *engine,
                                const gossip_message_t *msg,
                                const char *src_ip,
@@ -562,7 +505,6 @@ static void handle_join_message(gossip_engine_t *engine,
     LOG_INFO("Received JOIN from node %u (%s:%u)", 
              msg->sender_id, src_ip, src_port);
     
-    // Process piggyback updates (should contain the joining member's info)
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
@@ -581,14 +523,12 @@ static void handle_join_message(gossip_engine_t *engine,
             LOG_INFO("Added new member %u (%s:%u, type=%d)",
                      upd->node_id, upd->ip_address, upd->service_port, upd->node_type);
             
-            // Trigger join event
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
                                      upd->ip_address, upd->service_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
             
-            // Propagate the join
             update_queue_push(&engine->update_queue, upd);
             
             break;
@@ -596,9 +536,119 @@ static void handle_join_message(gossip_engine_t *engine,
     }
 }
 
-/**
- * Dispatch incoming message to appropriate handler
- */
+// ============================================================================
+// WORKER JOIN HANDLER (NEW)
+// ============================================================================
+
+static void handle_worker_join_message(gossip_engine_t *engine,
+                                       const gossip_message_t *msg,
+                                       const char *src_ip,
+                                       uint16_t src_port) {
+    LOG_INFO("Received WORKER_JOIN from node %u (%s:%u)", 
+             msg->sender_id, src_ip, src_port);
+    
+    // Only ROUTER nodes handle WORKER_JOIN requests
+    if (engine->my_type != NODE_TYPE_ROUTER) {
+        LOG_WARN("Non-router received WORKER_JOIN, ignoring");
+        return;
+    }
+    
+    // Add worker to cluster view
+    if (msg->num_updates > 0) {
+        const gossip_member_update_t *upd = &msg->updates[0];
+        
+        cluster_member_t member = {
+            .node_id = upd->node_id,
+            .node_type = NODE_TYPE_WORKER,
+            .port = upd->service_port,
+            .status = NODE_STATUS_ALIVE,
+            .incarnation = upd->incarnation
+        };
+        safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
+        
+        cluster_view_add(engine->cluster_view, &member);
+        
+        LOG_INFO("Worker %u joined cluster", upd->node_id);
+        
+        // Trigger event callback
+        if (engine->event_callback) {
+            engine->event_callback(upd->node_id, NODE_TYPE_WORKER,
+                                 upd->ip_address, upd->service_port,
+                                 MEMBER_EVENT_JOIN, engine->event_callback_data);
+        }
+    }
+    
+    // Build bootstrap response with list of active ROUTERS
+    gossip_bootstrap_response_t bootstrap_resp;
+    memset(&bootstrap_resp, 0, sizeof(bootstrap_resp));
+    
+    pthread_rwlock_rdlock(&engine->cluster_view->lock);
+    
+    for (size_t i = 0; i < engine->cluster_view->count; i++) {
+        cluster_member_t *m = &engine->cluster_view->members[i];
+        
+        if (m->node_type == NODE_TYPE_ROUTER && 
+            m->status == NODE_STATUS_ALIVE &&
+            bootstrap_resp.num_routers < MAX_CONFIG_ROUTERS) {
+            
+            bootstrap_resp.routers[bootstrap_resp.num_routers].node_id = m->node_id;
+            
+            // Reconstruct gossip and data addresses
+            snprintf(bootstrap_resp.routers[bootstrap_resp.num_routers].gossip_addr,
+                    MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->port);
+            
+            // Data port = service_port + 1 (convention)
+            snprintf(bootstrap_resp.routers[bootstrap_resp.num_routers].data_addr,
+                    MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->port + 1);
+            
+            bootstrap_resp.num_routers++;
+        }
+    }
+    
+    pthread_rwlock_unlock(&engine->cluster_view->lock);
+    
+    LOG_INFO("Sending JOIN_RESPONSE with %u routers to worker %u", 
+             bootstrap_resp.num_routers, msg->sender_id);
+    
+    // Build JOIN_RESPONSE message
+    gossip_message_t response = {
+        .version = 1,
+        .msg_type = GOSSIP_MSG_JOIN_RESPONSE,
+        .sender_id = engine->my_id,
+        .sequence_num = __sync_fetch_and_add(&engine->sequence_num, 1),
+        .num_updates = 0,
+        .flags = 0
+    };
+    
+    uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
+    
+    // Serialize gossip message header
+    ssize_t msg_size = gossip_message_serialize(&response, buffer, sizeof(buffer));
+    
+    // Append bootstrap data
+    ssize_t bootstrap_size = gossip_serialize_bootstrap_response(&bootstrap_resp, 
+                                                                 buffer + msg_size,
+                                                                 sizeof(buffer) - msg_size);
+    
+    if (msg_size > 0 && bootstrap_size > 0) {
+        ssize_t total_size = msg_size + bootstrap_size;
+        
+        if (gossip_send_udp(engine->udp_socket, buffer, total_size, 
+                           src_ip, src_port) > 0) {
+            LOG_INFO("Sent JOIN_RESPONSE to worker %u (%s:%u) with %u routers", 
+                     msg->sender_id, src_ip, src_port, bootstrap_resp.num_routers);
+        } else {
+            LOG_ERROR("Failed to send JOIN_RESPONSE to worker %u", msg->sender_id);
+        }
+    } else {
+        LOG_ERROR("Failed to serialize JOIN_RESPONSE");
+    }
+}
+
+// ============================================================================
+// MESSAGE DISPATCHER
+// ============================================================================
+
 static void dispatch_message(gossip_engine_t *engine,
                             const gossip_message_t *msg,
                             const char *src_ip,
@@ -629,14 +679,23 @@ static void dispatch_message(gossip_engine_t *engine,
             handle_join_message(engine, msg, src_ip, src_port);
             break;
             
-        case GOSSIP_MSG_PING_REQ:
-            LOG_DEBUG("PING_REQ not yet implemented");
+        case GOSSIP_MSG_WORKER_JOIN:
+            handle_worker_join_message(engine, msg, src_ip, src_port);
+            break;
+            
+        case GOSSIP_MSG_JOIN_RESPONSE:
+            // Handled by worker bootstrap code
+            LOG_DEBUG("Received JOIN_RESPONSE (handled by caller)");
             break;
             
         case GOSSIP_MSG_LEAVE:
             LOG_INFO("Node %u gracefully leaving", msg->sender_id);
             cluster_view_update_status(engine->cluster_view, msg->sender_id,
                                       NODE_STATUS_DEAD, msg->sequence_num);
+            break;
+            
+        case GOSSIP_MSG_PING_REQ:
+            LOG_DEBUG("PING_REQ not yet implemented");
             break;
             
         default:
@@ -649,9 +708,6 @@ static void dispatch_message(gossip_engine_t *engine,
 // UDP LISTENER THREAD
 // ============================================================================
 
-/**
- * UDP listener thread - receives and processes incoming gossip messages
- */
 static void* gossip_listener_thread(void *arg) {
     gossip_engine_t *engine = (gossip_engine_t*)arg;
     
@@ -662,14 +718,12 @@ static void* gossip_listener_thread(void *arg) {
     uint16_t src_port;
     
     while (!engine->shutdown_flag) {
-        // Receive UDP packet (non-blocking)
         ssize_t received = gossip_recv_udp(engine->udp_socket, recv_buffer,
                                           sizeof(recv_buffer), src_ip,
                                           sizeof(src_ip), &src_port);
         
         if (received < 0) {
-            // No data available, sleep briefly
-            usleep(10000);  // 10ms
+            usleep(10000);
             continue;
         }
         
@@ -678,14 +732,12 @@ static void* gossip_listener_thread(void *arg) {
             continue;
         }
         
-        // Deserialize message
         gossip_message_t msg;
         if (gossip_message_deserialize(recv_buffer, received, &msg) != 0) {
             LOG_WARN("Failed to deserialize gossip message from %s:%u", src_ip, src_port);
             continue;
         }
         
-        // Ignore messages from ourselves
         if (msg.sender_id == engine->my_id) {
             LOG_DEBUG("Ignoring message from self");
             continue;
@@ -698,10 +750,11 @@ static void* gossip_listener_thread(void *arg) {
                   (msg.msg_type == GOSSIP_MSG_ALIVE) ? "ALIVE" :
                   (msg.msg_type == GOSSIP_MSG_DEAD) ? "DEAD" :
                   (msg.msg_type == GOSSIP_MSG_JOIN) ? "JOIN" :
+                  (msg.msg_type == GOSSIP_MSG_WORKER_JOIN) ? "WORKER_JOIN" :
+                  (msg.msg_type == GOSSIP_MSG_JOIN_RESPONSE) ? "JOIN_RESPONSE" :
                   (msg.msg_type == GOSSIP_MSG_LEAVE) ? "LEAVE" : "UNKNOWN",
                   msg.sender_id, src_ip, src_port, msg.sequence_num, msg.num_updates);
         
-        // Dispatch to handler
         dispatch_message(engine, &msg, src_ip, src_port);
     }
     
@@ -710,49 +763,18 @@ static void* gossip_listener_thread(void *arg) {
 }
 
 // ============================================================================
-// ENGINE START/STOP
+// PROTOCOL LOOP HELPERS
 // ============================================================================
 
-
-/**
- * Send a test PING manually (for debugging)
- */
-int gossip_engine_send_ping(gossip_engine_t *engine, const char *dest_ip, uint16_t dest_port) {
-    gossip_message_t ping_msg = {
-        .version = 1,
-        .msg_type = GOSSIP_MSG_PING,
-        .flags = 0,
-        .sender_id = engine->my_id,
-        .sequence_num = __sync_fetch_and_add(&engine->sequence_num, 1),
-        .num_updates = 0
-    };
-    
-    uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
-    ssize_t msg_size = gossip_message_serialize(&ping_msg, buffer, sizeof(buffer));
-    if (msg_size > 0) {
-        return gossip_send_udp(engine->udp_socket, buffer, msg_size, dest_ip, dest_port);
-    }
-    return -1;
-}
-
-// ============================================================================
-// HELPER FUNCTIONS FOR PROTOCOL LOOP
-// ============================================================================
-
-/**
- * Select a random alive member from cluster view (excluding self)
- */
 static node_id_t select_random_peer(gossip_engine_t *engine) {
     node_id_t peer_list[MAX_CLUSTER_NODES];
     size_t peer_count = 0;
     
-    // Get all alive members from cluster view
     pthread_rwlock_rdlock(&engine->cluster_view->lock);
     
     for (size_t i = 0; i < engine->cluster_view->count; i++) {
         cluster_member_t *member = &engine->cluster_view->members[i];
         
-        // Skip ourselves and non-alive members
         if (member->node_id == engine->my_id || 
             member->status != NODE_STATUS_ALIVE) {
             continue;
@@ -766,19 +788,14 @@ static node_id_t select_random_peer(gossip_engine_t *engine) {
     pthread_rwlock_unlock(&engine->cluster_view->lock);
     
     if (peer_count == 0) {
-        return 0;  // No peers available
+        return 0;
     }
     
-    // Select random peer
     size_t random_index = rand() % peer_count;
     return peer_list[random_index];
 }
 
-/**
- * Send PING to a specific node
- */
 static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
-    // Get target node info from cluster view
     cluster_member_t *target = cluster_view_get(engine->cluster_view, target_node);
     if (!target) {
         LOG_WARN("Cannot ping node %u - not in cluster view", target_node);
@@ -786,12 +803,11 @@ static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
     }
     
     char target_ip[MAX_IP_LEN];
-    uint16_t target_gossip_port = target->port + 1000;  // Gossip port = service_port + 1000
+    uint16_t target_gossip_port = target->port;
     safe_strncpy(target_ip, target->ip_address, MAX_IP_LEN);
     
     cluster_view_release(engine->cluster_view);
     
-    // Build PING message
     gossip_message_t ping_msg = {
         .version = 1,
         .msg_type = GOSSIP_MSG_PING,
@@ -801,12 +817,10 @@ static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
         .num_updates = 0
     };
     
-    // Add piggyback updates from queue
     ping_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
                                                    ping_msg.updates,
                                                    engine->config.max_piggyback);
     
-    // Serialize message
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
     ssize_t msg_size = gossip_message_serialize(&ping_msg, buffer, sizeof(buffer));
     if (msg_size < 0) {
@@ -814,7 +828,6 @@ static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
         return -1;
     }
     
-    // Send UDP packet
     if (gossip_send_udp(engine->udp_socket, buffer, msg_size, 
                        target_ip, target_gossip_port) < 0) {
         LOG_WARN("Failed to send PING to node %u (%s:%u)", 
@@ -826,15 +839,11 @@ static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
               target_node, target_ip, target_gossip_port, 
               ping_msg.sequence_num, ping_msg.num_updates);
     
-    // Add to pending ACKs for timeout tracking
     add_pending_ack(engine, target_node);
     
     return 0;
 }
 
-/**
- * Check for SUSPECT nodes that have timed out and mark them DEAD
- */
 static void check_suspect_timeouts(gossip_engine_t *engine) {
     uint64_t now = time_now_ms();
     
@@ -858,14 +867,12 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
             
             pthread_rwlock_unlock(&engine->cluster_view->lock);
             
-            // Mark as DEAD
             LOG_ERROR("Node %u suspected for %lums, marking as DEAD", 
                      node_id, elapsed);
             
             cluster_view_update_status(engine->cluster_view, node_id,
                                       NODE_STATUS_DEAD, member->incarnation);
             
-            // Add DEAD update to queue for propagation
             gossip_member_update_t dead_update = {
                 .node_id = node_id,
                 .node_type = node_type,
@@ -877,14 +884,12 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
             
             update_queue_push(&engine->update_queue, &dead_update);
             
-            // Trigger event callback
             if (engine->event_callback) {
                 engine->event_callback(node_id, node_type, ip, port,
                                      MEMBER_EVENT_LEAVE, 
                                      engine->event_callback_data);
             }
             
-            // Re-acquire lock for next iteration
             pthread_rwlock_rdlock(&engine->cluster_view->lock);
         }
     }
@@ -892,11 +897,7 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
     pthread_rwlock_unlock(&engine->cluster_view->lock);
 }
 
-/**
- * Gossip state to random peers (for anti-entropy)
- */
 static void gossip_to_random_peers(gossip_engine_t *engine) {
-    // Get list of alive peers
     node_id_t peer_list[MAX_CLUSTER_NODES];
     size_t peer_count = 0;
     
@@ -918,46 +919,40 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
     pthread_rwlock_unlock(&engine->cluster_view->lock);
     
     if (peer_count == 0) {
-        return;  // No peers to gossip to
+        return;
     }
     
-    // Select random subset (fanout)
     size_t fanout = (peer_count < engine->config.fanout) ? 
                     peer_count : engine->config.fanout;
     
     for (size_t i = 0; i < fanout; i++) {
-        // Fisher-Yates shuffle to select random peer
         size_t j = i + (rand() % (peer_count - i));
         node_id_t temp = peer_list[i];
         peer_list[i] = peer_list[j];
         peer_list[j] = temp;
         
-        // Get peer info
         cluster_member_t *peer = cluster_view_get(engine->cluster_view, peer_list[i]);
         if (!peer) continue;
         
         char peer_ip[MAX_IP_LEN];
-        uint16_t peer_gossip_port = peer->port + 1000;
+        uint16_t peer_gossip_port = peer->port;
         safe_strncpy(peer_ip, peer->ip_address, MAX_IP_LEN);
         
         cluster_view_release(engine->cluster_view);
         
-        // Build gossip message with state updates
         gossip_message_t gossip_msg = {
             .version = 1,
-            .msg_type = GOSSIP_MSG_SUSPECT,  // Reuse SUSPECT as general gossip
+            .msg_type = GOSSIP_MSG_SUSPECT,
             .flags = 0,
             .sender_id = engine->my_id,
             .sequence_num = __sync_fetch_and_add(&engine->sequence_num, 1),
             .num_updates = 0
         };
         
-        // Add updates from queue
         gossip_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
                                                         gossip_msg.updates,
                                                         engine->config.max_piggyback);
         
-        // If no queued updates, add our own state
         if (gossip_msg.num_updates == 0) {
             gossip_msg.updates[0].node_id = engine->my_id;
             gossip_msg.updates[0].node_type = engine->my_type;
@@ -970,7 +965,6 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
             gossip_msg.num_updates = 1;
         }
         
-        // Serialize and send
         uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
         ssize_t msg_size = gossip_message_serialize(&gossip_msg, buffer, sizeof(buffer));
         if (msg_size > 0) {
@@ -982,9 +976,6 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
     }
 }
 
-/**
- * Update our uptime metric in cluster view
- */
 static void update_self_in_cluster_view(gossip_engine_t *engine) {
     cluster_member_t *self = cluster_view_get(engine->cluster_view, engine->my_id);
     if (self) {
@@ -999,13 +990,6 @@ static void update_self_in_cluster_view(gossip_engine_t *engine) {
 // SWIM PROTOCOL LOOP THREAD
 // ============================================================================
 
-/**
- * Main SWIM protocol loop - runs periodically to:
- * 1. Select random peer and send PING
- * 2. Check for ACK timeouts
- * 3. Check for SUSPECT -> DEAD transitions
- * 4. Gossip state to random peers (anti-entropy)
- */
 static void* gossip_protocol_thread(void *arg) {
     gossip_engine_t *engine = (gossip_engine_t*)arg;
     
@@ -1019,10 +1003,8 @@ static void* gossip_protocol_thread(void *arg) {
         
         LOG_DEBUG("=== SWIM Protocol Round %lu ===", round);
         
-        // Update our own state
         update_self_in_cluster_view(engine);
         
-        // Step 1: Select random alive peer and send PING
         node_id_t target = select_random_peer(engine);
         if (target != 0) {
             send_ping_to_node(engine, target);
@@ -1030,20 +1012,15 @@ static void* gossip_protocol_thread(void *arg) {
             LOG_DEBUG("No peers available for PING");
         }
         
-        // Step 2: Check for pending ACK timeouts
         check_ack_timeouts(engine);
         
-        // Step 3: Check for SUSPECT -> DEAD transitions
         check_suspect_timeouts(engine);
         
-        // Step 4: Gossip state to random peers (anti-entropy)
-        // Do this every few rounds to avoid excessive traffic
         if (round % 3 == 0) {
             gossip_to_random_peers(engine);
         }
         
-        // Step 5: Log current cluster state (debug)
-        if (round % 10 == 0) {  // Every 10 rounds
+        if (round % 10 == 0) {
             pthread_rwlock_rdlock(&engine->cluster_view->lock);
             size_t alive_count = 0, suspect_count = 0, dead_count = 0;
             
@@ -1062,7 +1039,6 @@ static void* gossip_protocol_thread(void *arg) {
                      engine->cluster_view->count, alive_count, suspect_count, dead_count);
         }
         
-        // Sleep until next protocol period
         usleep(engine->config.protocol_period_ms * 1000);
     }
     
@@ -1070,20 +1046,21 @@ static void* gossip_protocol_thread(void *arg) {
     return NULL;
 }
 
+// ============================================================================
+// ENGINE START/STOP
+// ============================================================================
 
 int gossip_engine_start(gossip_engine_t *engine) {
     if (!engine) {
         return -1;
     }
     
-    // Start UDP listener thread
     if (pthread_create(&engine->listener_thread, NULL, 
                       gossip_listener_thread, engine) != 0) {
         LOG_ERROR("Failed to start gossip listener thread");
         return -1;
     }
     
-    // Start SWIM protocol thread
     if (pthread_create(&engine->protocol_thread, NULL,
                       gossip_protocol_thread, engine) != 0) {
         LOG_ERROR("Failed to start SWIM protocol thread");
@@ -1096,8 +1073,6 @@ int gossip_engine_start(gossip_engine_t *engine) {
     return 0;
 }
 
-// Update gossip_engine_shutdown to wait for both threads:
-
 void gossip_engine_shutdown(gossip_engine_t *engine) {
     if (!engine) return;
     
@@ -1105,17 +1080,14 @@ void gossip_engine_shutdown(gossip_engine_t *engine) {
     
     engine->shutdown_flag = 1;
     
-    // Wait for both threads to exit
     pthread_join(engine->listener_thread, NULL);
     pthread_join(engine->protocol_thread, NULL);
     
-    // Close socket
     if (engine->udp_socket >= 0) {
         close(engine->udp_socket);
         engine->udp_socket = -1;
     }
     
-    // Cleanup
     pthread_mutex_destroy(&engine->pending_acks_lock);
     update_queue_destroy(&engine->update_queue);
     
@@ -1125,7 +1097,7 @@ void gossip_engine_shutdown(gossip_engine_t *engine) {
 }
 
 // ============================================================================
-// ADD SEED AND JOIN FUNCTIONS
+// PUBLIC API FUNCTIONS
 // ============================================================================
 
 int gossip_engine_add_seed(gossip_engine_t *engine, const char *ip, uint16_t gossip_port) {
@@ -1134,9 +1106,6 @@ int gossip_engine_add_seed(gossip_engine_t *engine, const char *ip, uint16_t gos
     }
     
     LOG_INFO("Adding seed node: %s:%u", ip, gossip_port);
-    
-    // We don't know the seed's node_id yet, so we'll discover it via JOIN
-    // For now, just send a JOIN announcement to the seed
     
     gossip_message_t join_msg = {
         .version = 1,
@@ -1147,7 +1116,6 @@ int gossip_engine_add_seed(gossip_engine_t *engine, const char *ip, uint16_t gos
         .num_updates = 1
     };
     
-    // Add our info as update
     join_msg.updates[0].node_id = engine->my_id;
     join_msg.updates[0].node_type = engine->my_type;
     join_msg.updates[0].status = NODE_STATUS_ALIVE;
@@ -1157,7 +1125,6 @@ int gossip_engine_add_seed(gossip_engine_t *engine, const char *ip, uint16_t gos
     join_msg.updates[0].timestamp_ms = time_now_ms();
     safe_strncpy(join_msg.updates[0].ip_address, engine->my_ip, MAX_IP_LEN);
     
-    // Serialize and send
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
     ssize_t msg_size = gossip_message_serialize(&join_msg, buffer, sizeof(buffer));
     if (msg_size > 0) {
@@ -1177,7 +1144,6 @@ int gossip_engine_announce_join(gossip_engine_t *engine) {
     
     LOG_INFO("Announcing join to cluster");
     
-    // Add ourselves to cluster view first
     cluster_member_t self = {
         .node_id = engine->my_id,
         .node_type = engine->my_type,
@@ -1190,7 +1156,6 @@ int gossip_engine_announce_join(gossip_engine_t *engine) {
     
     cluster_view_add(engine->cluster_view, &self);
     
-    // Add JOIN update to queue for propagation
     gossip_member_update_t join_update = {
         .node_id = engine->my_id,
         .node_type = engine->my_type,
@@ -1202,7 +1167,6 @@ int gossip_engine_announce_join(gossip_engine_t *engine) {
     };
     safe_strncpy(join_update.ip_address, engine->my_ip, MAX_IP_LEN);
     
-    // Add multiple times for faster propagation
     for (int i = 0; i < 5; i++) {
         update_queue_push(&engine->update_queue, &join_update);
     }
@@ -1217,7 +1181,6 @@ int gossip_engine_leave(gossip_engine_t *engine) {
     
     LOG_INFO("Announcing graceful leave to cluster");
     
-    // Build LEAVE message
     gossip_message_t leave_msg = {
         .version = 1,
         .msg_type = GOSSIP_MSG_LEAVE,
@@ -1232,7 +1195,6 @@ int gossip_engine_leave(gossip_engine_t *engine) {
     leave_msg.updates[0].incarnation = engine->incarnation;
     leave_msg.updates[0].timestamp_ms = time_now_ms();
     
-    // Send to all known peers
     pthread_rwlock_rdlock(&engine->cluster_view->lock);
     
     for (size_t i = 0; i < engine->cluster_view->count; i++) {
@@ -1240,7 +1202,7 @@ int gossip_engine_leave(gossip_engine_t *engine) {
         
         if (member->node_id == engine->my_id) continue;
         
-        uint16_t peer_gossip_port = member->port + 1000;
+        uint16_t peer_gossip_port = member->port;
         
         uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
         ssize_t msg_size = gossip_message_serialize(&leave_msg, buffer, sizeof(buffer));

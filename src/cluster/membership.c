@@ -58,10 +58,8 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
     
     pthread_rwlock_wrlock(&view->lock);
     
-    // Check if member already exists
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == member->node_id) {
-            // Update existing member
             view->members[i] = *member;
             view->members[i].last_seen_ms = time_now_ms();
             pthread_rwlock_unlock(&view->lock);
@@ -70,7 +68,6 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
         }
     }
     
-    // Add new member
     if (view->count >= view->capacity) {
         pthread_rwlock_unlock(&view->lock);
         LOG_ERROR("Cluster view full (capacity: %zu)", view->capacity);
@@ -84,7 +81,7 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
     pthread_rwlock_unlock(&view->lock);
     
     LOG_INFO("Added member %u (%s:%u, type=%d)", 
-                   member->node_id, member->ip_address, member->port, member->node_type);
+             member->node_id, member->ip_address, member->port, member->node_type);
     return RESULT_OK;
 }
 
@@ -96,18 +93,17 @@ int cluster_view_update_status(cluster_view_t *view, node_id_t node_id,
     
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == node_id) {
-            // Only update if incarnation is newer or equal
             if (incarnation >= view->members[i].incarnation) {
                 view->members[i].status = status;
                 view->members[i].incarnation = incarnation;
                 view->members[i].last_seen_ms = time_now_ms();
                 pthread_rwlock_unlock(&view->lock);
                 LOG_DEBUG("Updated node %u status to %d (incarnation %lu)", 
-                               node_id, status, incarnation);
+                          node_id, status, incarnation);
                 return RESULT_OK;
             }
             pthread_rwlock_unlock(&view->lock);
-            return RESULT_OK; // Stale update, ignore
+            return RESULT_OK;
         }
     }
     
@@ -123,7 +119,6 @@ int cluster_view_remove(cluster_view_t *view, node_id_t node_id) {
     
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == node_id) {
-            // Shift remaining members
             if (i < view->count - 1) {
                 memmove(&view->members[i], &view->members[i + 1], 
                        (view->count - i - 1) * sizeof(cluster_member_t));
@@ -146,7 +141,6 @@ cluster_member_t* cluster_view_get(cluster_view_t *view, node_id_t node_id) {
     
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == node_id) {
-            // Return pointer - caller must call cluster_view_release
             return &view->members[i];
         }
     }
@@ -199,31 +193,11 @@ size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
 }
 
 // ============================================================================
-// MEMBERSHIP HANDLE (Simple Gossip Implementation)
+// MEMBERSHIP HANDLE IMPLEMENTATION
 // ============================================================================
 
-#define MAX_GOSSIP_MEMBERS 512
-#define GOSSIP_INTERVAL_MS 2000
-#define GOSSIP_FANOUT 3
-
-struct membership_handle {
-    node_id_t my_id;
-    node_type_t my_type;
-    char bind_addr[MAX_IP_LEN];
-    uint16_t bind_port;
-    uint16_t service_port;
-    
-    cluster_view_t internal_view;
-    
-    member_event_cb event_callback;
-    void *event_callback_user_data;
-    
-    gossip_engine_t *gossip_engine;
-    int shutdown_flag;
-};
-
 int membership_init(membership_handle_t **handle, node_id_t my_id, 
-                   node_type_t my_type, const char *bind_addr, uint16_t bind_port) {
+                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port) {
     if (!handle) return RESULT_ERR_INVALID;
     
     membership_handle_t *h = safe_calloc(1, sizeof(membership_handle_t));
@@ -232,29 +206,25 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
     h->my_id = my_id;
     h->my_type = my_type;
     safe_strncpy(h->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
-    h->bind_port = bind_port;
-    h->service_port = bind_port;  // Assume bind_port is service port
+    h->gossip_port = gossip_port;
+    h->service_port = gossip_port;
     h->shutdown_flag = 0;
     
-    if (cluster_view_init(&h->internal_view, MAX_GOSSIP_MEMBERS) != RESULT_OK) {
+    if (cluster_view_init(&h->internal_view, MAX_CLUSTER_NODES) != RESULT_OK) {
         safe_free(h);
         return RESULT_ERR_INVALID;
     }
     
-    // Add ourselves to the view
     cluster_member_t self = {
         .node_id = my_id,
         .node_type = my_type,
-        .port = bind_port,
+        .port = gossip_port,
         .status = NODE_STATUS_ALIVE,
         .incarnation = 0,
         .last_seen_ms = time_now_ms()
     };
     safe_strncpy(self.ip_address, h->bind_addr, MAX_IP_LEN);
     cluster_view_add(&h->internal_view, &self);
-    
-    // Initialize SWIM gossip engine
-    uint16_t gossip_port = bind_port + 1000;  // Gossip on service_port + 1000
     
     gossip_config_t gossip_config = gossip_default_config();
     
@@ -263,10 +233,10 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
         my_type,
         h->bind_addr,
         gossip_port,
-        bind_port,
+        gossip_port,
         &gossip_config,
         &h->internal_view,
-        NULL,  // Event callback set separately
+        NULL,
         NULL
     );
     
@@ -277,7 +247,6 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
         return RESULT_ERR_INVALID;
     }
     
-    // Start gossip engine
     if (gossip_engine_start(h->gossip_engine) != 0) {
         LOG_ERROR("Failed to start gossip engine");
         gossip_engine_shutdown(h->gossip_engine);
@@ -297,16 +266,11 @@ int membership_join(membership_handle_t *handle, const char *seed_addr, uint16_t
     
     LOG_INFO("Joining cluster via seed %s:%u", seed_addr, seed_port);
     
-    // Calculate seed's gossip port (assume same offset)
-    uint16_t seed_gossip_port = seed_port + 1000;
-    
-    // Send JOIN to seed via gossip engine
-    if (gossip_engine_add_seed(handle->gossip_engine, seed_addr, seed_gossip_port) != 0) {
+    if (gossip_engine_add_seed(handle->gossip_engine, seed_addr, seed_port) != 0) {
         LOG_ERROR("Failed to send JOIN to seed");
         return RESULT_ERR_NETWORK;
     }
     
-    // Announce our join to the cluster
     gossip_engine_announce_join(handle->gossip_engine);
     
     LOG_INFO("JOIN sent to seed, waiting for cluster view to populate...");
@@ -319,7 +283,6 @@ int membership_set_callback(membership_handle_t *handle, member_event_cb callbac
     handle->event_callback = callback;
     handle->event_callback_user_data = user_data;
     
-    // Forward callback to gossip engine
     if (handle->gossip_engine) {
         gossip_engine_set_callback(handle->gossip_engine, callback, user_data);
     }
@@ -332,12 +295,10 @@ int membership_leave(membership_handle_t *handle) {
     
     LOG_INFO("Gracefully leaving cluster");
     
-    // Use gossip engine to announce LEAVE
     if (handle->gossip_engine) {
         gossip_engine_leave(handle->gossip_engine);
     }
     
-    // Give time for LEAVE messages to propagate
     sleep(1);
     
     return RESULT_OK;
@@ -348,7 +309,6 @@ void membership_shutdown(membership_handle_t *handle) {
     
     handle->shutdown_flag = 1;
     
-    // Shutdown gossip engine (also shuts down its threads)
     if (handle->gossip_engine) {
         gossip_engine_shutdown(handle->gossip_engine);
         handle->gossip_engine = NULL;

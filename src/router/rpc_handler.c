@@ -53,38 +53,6 @@ static int handle_get_execution_status(rpc_async_context_t *context,
 }
 
 // ============================================================================
-// HANDLER: Worker Heartbeat (Worker -> Router)
-// ============================================================================
-
-/**
- * Request payload:
- *   [worker_id: 4 bytes][active_execs: 4 bytes][load_score: 4 bytes (float)]
- * 
- * Response: ACK
- */
-static int handle_worker_heartbeat(rpc_async_context_t *context,
-                                   const uint8_t *in_data, size_t in_len) {
-    LOG_DEBUG("Hearthbeat arrived");
-    if (!g_router_state || in_len != 16) {
-        LOG_ERROR("Invalid hearthbeat arrived");
-        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
-    }
-    
-    node_id_t worker_id;
-    uint32_t active_execs;
-    float load_score;
-    
-    memcpy(&worker_id, in_data, sizeof(node_id_t));
-    memcpy(&active_execs, in_data + 4, sizeof(uint32_t));
-    memcpy(&load_score, in_data + 8, sizeof(float));
-    
-    router_on_worker_heartbeat(g_router_state, worker_id, active_execs, load_score);
-    
-    uint8_t ack = 1;
-    return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
-}
-
-// ============================================================================
 // HANDLER: Execution Status Update (Worker -> Router)
 // ============================================================================
 
@@ -181,7 +149,7 @@ static int handle_worker_register(rpc_async_context_t *context,
     LOG_INFO("[RPC] Worker registration: ID=%u, SERVICE:%u, DATA:%u",
                    worker_id, service_port, data_port);
 
-    router_on_worker_join(g_router_state, worker_id, worker_ip, service_port, data_port);
+    router_on_worker_join(g_router_state, worker_id, worker_ip, data_port);
 
     uint8_t ack = 1;
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
@@ -199,7 +167,6 @@ rpc_service_entry_t router_rpc_service_table[] = {
     
     // Worker operations
     { FUNC_ID_WORKER_REGISTRATION, handle_worker_register, 16 },         // FUNC_ID_WORKER_REGISTER
-    { FUNC_ID_WORKER_HEARTBEAT, handle_worker_heartbeat, 16 },
     { FUNC_ID_EXECUTION_UPDATE, handle_execution_update, 16 },
     
     // Sentinel

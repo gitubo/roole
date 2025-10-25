@@ -6,6 +6,9 @@
 #include "roole/common.h"
 #include <pthread.h>
 
+// Forward declaration
+typedef struct gossip_engine gossip_engine_t;
+
 // ============================================================================
 // NODE TYPES & STATUS
 // ============================================================================
@@ -36,7 +39,7 @@ typedef struct cluster_member {
     uint16_t port;
     node_status_t status;
     uint64_t last_seen_ms;
-    uint64_t incarnation;  // For gossip conflict resolution (SWIM)
+    uint64_t incarnation;
 } cluster_member_t;
 
 // ============================================================================
@@ -50,11 +53,9 @@ typedef struct cluster_view {
     pthread_rwlock_t lock;
 } cluster_view_t;
 
-// Cluster view management
 int cluster_view_init(cluster_view_t *view, size_t capacity);
 void cluster_view_destroy(cluster_view_t *view);
 
-// Member operations (thread-safe)
 int cluster_view_add(cluster_view_t *view, const cluster_member_t *member);
 int cluster_view_update_status(cluster_view_t *view, node_id_t node_id, 
                                node_status_t status, uint64_t incarnation);
@@ -62,17 +63,35 @@ int cluster_view_remove(cluster_view_t *view, node_id_t node_id);
 cluster_member_t* cluster_view_get(cluster_view_t *view, node_id_t node_id);
 void cluster_view_release(cluster_view_t *view);
 
-// Query operations
 size_t cluster_view_list_by_type(cluster_view_t *view, node_type_t type,
                                  node_id_t *out_node_ids, size_t max_count);
 size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
                                node_id_t *out_node_ids, size_t max_count);
 
 // ============================================================================
-// MEMBERSHIP (Gossip Protocol - Serf-like wrapper)
+// MEMBERSHIP (Gossip Protocol Wrapper)
 // ============================================================================
 
-typedef struct membership_handle membership_handle_t;
+// Callback for membership events
+typedef void (*member_event_cb)(node_id_t node_id, node_type_t type, 
+                                const char *ip, uint16_t port,
+                                const char *event_type, void *user_data);
+
+typedef struct membership_handle {
+    node_id_t my_id;
+    node_type_t my_type;
+    char bind_addr[MAX_IP_LEN];
+    uint16_t gossip_port;
+    uint16_t service_port;
+    
+    cluster_view_t internal_view;
+    
+    member_event_cb event_callback;
+    void *event_callback_user_data;
+    
+    gossip_engine_t *gossip_engine;  // Public access for direct gossip operations
+    int shutdown_flag;
+} membership_handle_t;
 
 // Event types
 #define MEMBER_EVENT_JOIN "member-join"
@@ -80,51 +99,15 @@ typedef struct membership_handle membership_handle_t;
 #define MEMBER_EVENT_FAILED "member-failed"
 #define MEMBER_EVENT_UPDATE "member-update"
 
-// Callback for membership events
-typedef void (*member_event_cb)(node_id_t node_id, node_type_t type, 
-                                const char *ip, uint16_t port,
-                                const char *event_type, void *user_data);
 
 // Membership API
 int membership_init(membership_handle_t **handle, node_id_t my_id, 
-                   node_type_t my_type, const char *bind_addr, uint16_t bind_port);
+                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port);
 int membership_join(membership_handle_t *handle, const char *seed_addr, uint16_t seed_port);
 int membership_set_callback(membership_handle_t *handle, member_event_cb callback, void *user_data);
 int membership_leave(membership_handle_t *handle);
 void membership_shutdown(membership_handle_t *handle);
 
-// Get current members (for debugging/monitoring)
 size_t membership_get_members(membership_handle_t *handle, cluster_member_t *out_members, size_t max_count);
-
-// ============================================================================
-// HEARTBEAT & FAILURE DETECTION
-// ============================================================================
-
-#define DEFAULT_HEARTBEAT_INTERVAL_MS 1000
-#define DEFAULT_HEARTBEAT_TIMEOUT_MS 5000
-
-typedef struct heartbeat_config {
-    uint32_t interval_ms;       // How often to send heartbeat
-    uint32_t timeout_ms;        // When to mark as suspect
-    uint32_t dead_timeout_ms;   // When to mark as dead
-} heartbeat_config_t;
-
-typedef struct heartbeat_tracker heartbeat_tracker_t;
-
-// Heartbeat tracker (used by routers to track workers)
-int heartbeat_tracker_init(heartbeat_tracker_t **tracker, const heartbeat_config_t *config);
-void heartbeat_tracker_destroy(heartbeat_tracker_t *tracker);
-
-// Register/unregister nodes to track
-int heartbeat_tracker_add_node(heartbeat_tracker_t *tracker, node_id_t node_id);
-int heartbeat_tracker_remove_node(heartbeat_tracker_t *tracker, node_id_t node_id);
-
-// Update heartbeat (called when heartbeat received)
-int heartbeat_tracker_update(heartbeat_tracker_t *tracker, node_id_t node_id);
-
-// Check for timeouts (should be called periodically)
-typedef void (*heartbeat_timeout_cb)(node_id_t node_id, node_status_t new_status, void *user_data);
-int heartbeat_tracker_check_timeouts(heartbeat_tracker_t *tracker, 
-                                    heartbeat_timeout_cb callback, void *user_data);
 
 #endif // ROOLE_CLUSTER_H

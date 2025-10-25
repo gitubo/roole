@@ -20,7 +20,9 @@ typedef enum {
     GOSSIP_MSG_ALIVE = 5,       // Refute suspicion
     GOSSIP_MSG_DEAD = 6,        // Declare node dead
     GOSSIP_MSG_JOIN = 7,        // New member joining
-    GOSSIP_MSG_LEAVE = 8        // Graceful leave
+    GOSSIP_MSG_LEAVE = 8,        // Graceful leave
+    GOSSIP_MSG_WORKER_JOIN = 9,  
+    GOSSIP_MSG_JOIN_RESPONSE = 10 
 } gossip_msg_type_t;
 
 // ============================================================================
@@ -42,6 +44,9 @@ typedef struct gossip_member_update {
     uint64_t timestamp_ms;       // When this update was created
 } gossip_member_update_t;
 
+#define MAX_CONFIG_STRING 256
+#define MAX_CONFIG_ROUTERS 16
+
 // Gossip message header
 typedef struct gossip_message {
     uint8_t version;             // Protocol version (currently 1)
@@ -56,6 +61,15 @@ typedef struct gossip_message {
     gossip_member_update_t updates[GOSSIP_MAX_PIGGYBACK_UPDATES];
     
 } gossip_message_t;
+
+typedef struct gossip_bootstrap_response {
+    uint8_t num_routers;
+    struct {
+        node_id_t node_id;
+        char gossip_addr[MAX_CONFIG_STRING];
+        char data_addr[MAX_CONFIG_STRING];
+    } routers[MAX_CONFIG_ROUTERS];
+} gossip_bootstrap_response_t;
 
 // ============================================================================
 // GOSSIP PROTOCOL CONFIGURATION
@@ -153,6 +167,13 @@ ssize_t gossip_message_serialize(const gossip_message_t *msg, uint8_t *buffer, s
  */
 int gossip_message_deserialize(const uint8_t *buffer, size_t buffer_size, gossip_message_t *msg);
 
+ssize_t gossip_serialize_bootstrap_response(const gossip_bootstrap_response_t *resp, 
+                                            uint8_t *buffer, size_t buffer_size);
+
+int gossip_deserialize_bootstrap_response(const uint8_t *buffer, size_t buffer_size,
+                                          gossip_bootstrap_response_t *resp);
+
+size_t gossip_message_serialized_size(const gossip_message_t *msg);
 
 void gossip_engine_set_callback(gossip_engine_t *engine, 
                                 member_event_cb callback, 

@@ -7,6 +7,7 @@
 #include "roole/dag.h"
 #include "roole/cluster.h"
 #include "roole/rpc.h"
+#include "roole/gossip.h"
 #include <pthread.h>
 
 // ============================================================================
@@ -20,16 +21,13 @@ typedef struct router_state router_state_t;
 typedef struct worker_info {
     node_id_t worker_id;
     char ip[MAX_IP_LEN];
-    uint16_t service_port;  // Port for SERVICE channel
-    uint16_t data_port;     // Port for DATA channel
+    uint16_t data_port;
     node_status_t status;
     uint32_t active_executions;
-    float load_score;  // For load balancing (0.0 = idle, 1.0 = fully loaded)
-    uint64_t last_heartbeat_ms;
+    float load_score;
+    uint64_t last_seen_ms;
 
-    // Separate RPC channels for service and data communication
-    rpc_channel_t *service_channel;  // For heartbeat, registration, catalog sync
-    rpc_channel_t *data_channel;     // For message processing, execution updates
+    rpc_channel_t *data_channel;
 } worker_info_t;
 
 typedef struct worker_pool {
@@ -43,7 +41,7 @@ int worker_pool_init(worker_pool_t *pool, size_t capacity);
 void worker_pool_destroy(worker_pool_t *pool);
 
 int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
-                    uint16_t service_port, uint16_t data_port);
+                    uint16_t data_port);
 int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id);
 int worker_pool_update_status(worker_pool_t *pool, node_id_t worker_id, node_status_t status);
 int worker_pool_update_load(worker_pool_t *pool, node_id_t worker_id, 
@@ -52,25 +50,21 @@ int worker_pool_update_load(worker_pool_t *pool, node_id_t worker_id,
 worker_info_t* worker_pool_get(worker_pool_t *pool, node_id_t worker_id);
 void worker_pool_release(worker_pool_t *pool);
 
-// Load balancing
 node_id_t worker_pool_select_least_loaded(worker_pool_t *pool);
 node_id_t worker_pool_select_round_robin(worker_pool_t *pool);
 
-// Query
 size_t worker_pool_list_alive(worker_pool_t *pool, node_id_t *out_worker_ids, size_t max_count);
 
 // ============================================================================
 // RPC HANDLERS
 // ============================================================================
 
-// Set global router state for RPC handlers
 void router_set_rpc_state(router_state_t *router);
 
-// RPC service table for router
 extern rpc_service_entry_t router_rpc_service_table[];
 
 // ============================================================================
-// EXECUTION TRACKER (Track active executions on workers)
+// EXECUTION TRACKER
 // ============================================================================
 
 #define MAX_PENDING_EXECUTIONS 10000
@@ -98,11 +92,10 @@ typedef struct execution_record {
     uint8_t retry_count;
     uint8_t max_retries;
     
-    // Original message for retry
     uint8_t message_data[MAX_MESSAGE_SIZE];
     size_t message_len;
     
-    int active;  // 1 if tracking, 0 if slot free
+    int active;
 } execution_record_t;
 
 typedef struct message {
@@ -111,7 +104,7 @@ typedef struct message {
     uint8_t message_data[MAX_MESSAGE_SIZE];
     size_t message_len;
     uint64_t received_at_ms;
-    node_id_t sender_id;  // Original client/sender
+    node_id_t sender_id;
 } message_t;
 
 typedef struct execution_tracker {
@@ -124,24 +117,19 @@ typedef struct execution_tracker {
 int execution_tracker_init(execution_tracker_t *tracker, size_t capacity);
 void execution_tracker_destroy(execution_tracker_t *tracker);
 
-// Add new execution
 execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag_id,
                                     node_id_t worker_id, const uint8_t *message, 
                                     size_t message_len, uint8_t max_retries);
 
-// Update execution status
 int execution_tracker_update_status(execution_tracker_t *tracker, execution_id_t exec_id,
                                    execution_status_t status);
 
-// Query
 execution_record_t* execution_tracker_get(execution_tracker_t *tracker, execution_id_t exec_id);
 void execution_tracker_release(execution_tracker_t *tracker);
 
-// Get all executions on a specific worker
 size_t execution_tracker_get_by_worker(execution_tracker_t *tracker, node_id_t worker_id,
                                       execution_id_t *out_exec_ids, size_t max_count);
 
-// Remove completed/failed executions (cleanup)
 int execution_tracker_remove(execution_tracker_t *tracker, execution_id_t exec_id);
 size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker);
 
@@ -151,30 +139,19 @@ size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker);
 
 typedef struct router_state {
     node_id_t router_id;
-    uint16_t service_port;   // Port for SERVICE channel (worker management)
-    uint16_t data_port;      // Port for DATA channel (worker communication)
-    uint16_t ingress_port;   // Port for INGRESS channel (client requests)
+    uint16_t gossip_port;
+    uint16_t data_port;
+    uint16_t ingress_port;
+    char bind_addr[MAX_IP_LEN];
 
-    // DAG catalog (replicated via Raft consensus)
     dag_catalog_t dag_catalog;
-
-    // Worker management
     worker_pool_t worker_pool;
     execution_tracker_t exec_tracker;
 
-    // Cluster membership
     cluster_view_t cluster_view;
     membership_handle_t *membership;
+    gossip_engine_t *gossip_engine;
 
-    // Heartbeat tracking for workers
-    heartbeat_tracker_t *heartbeat_tracker;
-
-    // Consensus (for DAG catalog sync - optional, placeholder for Raft)
-    // raft_handle_t *raft;
-
-    // Background threads
-    pthread_t heartbeat_thread;
-    pthread_t recovery_thread;
     pthread_t cleanup_thread;
 
     int shutdown_flag;
@@ -184,19 +161,17 @@ typedef struct router_state {
 // ROUTER API
 // ============================================================================
 
-// Initialization
 int router_init(router_state_t *router, node_id_t router_id,
-               uint16_t service_port, uint16_t data_port, uint16_t ingress_port);
+               uint16_t gossip_port, uint16_t data_port, uint16_t ingress_port,
+               const char *bind_addr);
 int router_start(router_state_t *router);
 void router_shutdown(router_state_t *router);
 
-// DAG management (triggers consensus among routers)
 int router_add_dag(router_state_t *router, const dag_t *dag);
 int router_update_dag(router_state_t *router, const dag_t *dag);
 int router_remove_dag(router_state_t *router, rule_id_t dag_id);
 dag_t* router_get_dag(router_state_t *router, rule_id_t dag_id);
 
-// Message submission & execution
 int router_submit_message(router_state_t *router, rule_id_t dag_id,
                          const uint8_t *message, size_t message_len,
                          execution_id_t *out_exec_id);
@@ -204,16 +179,10 @@ int router_submit_message(router_state_t *router, rule_id_t dag_id,
 int router_get_execution_status(router_state_t *router, execution_id_t exec_id,
                                execution_status_t *out_status);
 
-// Worker management (called by membership callbacks)
 int router_on_worker_join(router_state_t *router, node_id_t worker_id,
-                         const char *ip, uint16_t service_port, uint16_t data_port);
+                         const char *ip, uint16_t data_port);
 int router_on_worker_failed(router_state_t *router, node_id_t worker_id);
 
-// Worker heartbeat/status update (called by RPC handlers)
-int router_on_worker_heartbeat(router_state_t *router, node_id_t worker_id,
-                              uint32_t active_execs, float load);
-
-// Execution status update (called by RPC handlers)
 int router_on_execution_update(router_state_t *router, execution_id_t exec_id,
                               execution_status_t status);
 

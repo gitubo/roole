@@ -38,12 +38,8 @@ void worker_pool_destroy(worker_pool_t *pool) {
 
     pthread_mutex_lock(&pool->lock);
 
-    // Close all RPC channels (both service and data)
+    // Close all RPC channels 
     for (size_t i = 0; i < pool->count; i++) {
-        if (pool->workers[i].service_channel) {
-            rpc_channel_destroy(pool->workers[i].service_channel);
-            safe_free(pool->workers[i].service_channel);
-        }
         if (pool->workers[i].data_channel) {
             rpc_channel_destroy(pool->workers[i].data_channel);
             safe_free(pool->workers[i].data_channel);
@@ -64,8 +60,7 @@ void worker_pool_destroy(worker_pool_t *pool) {
 // COMMENT: Fix worker_pool_add to NOT initialize channels (they come from connection)
 // Modify worker_pool_add function (around line 60):
 
-int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
-                    uint16_t service_port, uint16_t data_port) {
+int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip, uint16_t data_port) {
     if (!pool || !ip) return RESULT_ERR_INVALID;
 
     pthread_mutex_lock(&pool->lock);
@@ -91,23 +86,21 @@ int worker_pool_add(worker_pool_t *pool, node_id_t worker_id, const char *ip,
 
     worker->worker_id = worker_id;
     safe_strncpy(worker->ip, ip, MAX_IP_LEN);
-    worker->service_port = service_port;
     worker->data_port = data_port;
     worker->status = NODE_STATUS_ALIVE;
     worker->active_executions = 0;
     worker->load_score = 0.0f;
-    worker->last_heartbeat_ms = time_now_ms();
+    worker->last_seen_ms = time_now_ms();
     
     // COMMENT: Initialize channels as NULL - they will be created on-demand
-    worker->service_channel = NULL;
     worker->data_channel = NULL;
 
     pool->count++;
 
     pthread_mutex_unlock(&pool->lock);
 
-    LOG_INFO("Added worker %u (%s SERVICE:%u DATA:%u) to pool",
-                   worker_id, ip, service_port, data_port);
+    LOG_INFO("Added worker %u (%s DATA:%u) to pool",
+                   worker_id, ip, data_port);
     return RESULT_OK;
 }
 
@@ -118,11 +111,7 @@ int worker_pool_remove(worker_pool_t *pool, node_id_t worker_id) {
 
     for (size_t i = 0; i < pool->count; i++) {
         if (pool->workers[i].worker_id == worker_id) {
-            // Close RPC channels (both service and data)
-            if (pool->workers[i].service_channel) {
-                rpc_channel_destroy(pool->workers[i].service_channel);
-                safe_free(pool->workers[i].service_channel);
-            }
+            // Close RPC channels (data)
             if (pool->workers[i].data_channel) {
                 rpc_channel_destroy(pool->workers[i].data_channel);
                 safe_free(pool->workers[i].data_channel);
@@ -174,7 +163,7 @@ int worker_pool_update_load(worker_pool_t *pool, node_id_t worker_id,
         if (pool->workers[i].worker_id == worker_id) {
             pool->workers[i].active_executions = active_execs;
             pool->workers[i].load_score = load_score;
-            pool->workers[i].last_heartbeat_ms = time_now_ms();
+            pool->workers[i].last_seen_ms = time_now_ms();
             
             pthread_mutex_unlock(&pool->lock);
             LOG_DEBUG("Worker %u load: %u execs, score %.2f", 

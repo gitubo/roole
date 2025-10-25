@@ -4,10 +4,12 @@
 #define ROOLE_WORKER_H
 
 #include "roole/common.h"
+#include "roole/config.h"
 #include "roole/dag.h"
 #include "roole/cluster.h"
 #include "roole/rpc.h"
 #include "roole/worker_metrics.h"
+#include "roole/gossip.h"
 #include <pthread.h>
 
 // ============================================================================
@@ -82,35 +84,30 @@ typedef struct router_connection {
 
 typedef struct worker_state {
     node_id_t worker_id;
-    uint16_t service_port;  // Port for SERVICE channel (heartbeat, registration)
-    uint16_t data_port;     // Port for DATA channel (message processing)
-
-    // DAG catalog (read-only, synced from routers)
+    uint16_t gossip_port;      // NUOVO
+    uint16_t data_port;
+    char bind_addr[MAX_IP_LEN]; // NUOVO
+    
     dag_catalog_t dag_catalog;
     uint64_t catalog_version;
-
-    // Task execution
+    
     message_queue_t message_queue;
     uint32_t active_executions;
-
-    // Metrics (optional, NULL if disabled)
+    
     worker_metrics_t *metrics;
-
-    // Router connections
+    uint64_t start_time_ms;
+    
     router_connection_t routers[MAX_ROUTER_CONNECTIONS];
     size_t router_count;
     pthread_mutex_t routers_lock;
-
-    // Cluster membership
+    
     cluster_view_t cluster_view;
     membership_handle_t *membership;
-
-    // Worker threads
+    gossip_engine_t *gossip_engine;  // NUOVO: accesso diretto
+    
     pthread_t executor_threads[16];
     size_t num_executor_threads;
-
-    pthread_t heartbeat_thread;
-
+    
     int shutdown_flag;
 } worker_state_t;
 
@@ -120,10 +117,15 @@ typedef struct worker_state {
 
 // Initialization
 int worker_init(worker_state_t *worker, node_id_t worker_id,
-               uint16_t service_port, uint16_t data_port,
-               size_t num_executor_threads, uint16_t metrics_port);
+               uint16_t gossip_port, uint16_t data_port,
+               const char *bind_addr, size_t num_executor_threads, 
+               uint16_t metrics_port);
+
 int worker_start(worker_state_t *worker);
+
 void worker_shutdown(worker_state_t *worker);
+
+int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *config);
 
 // Message management
 int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
@@ -132,7 +134,7 @@ int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
 
 // Router communication
 int worker_add_router(worker_state_t *worker, node_id_t router_id,
-                     const char *ip, uint16_t service_port, uint16_t data_port);
+                     const char *ip, uint16_t data_port);
 int worker_remove_router(worker_state_t *worker, node_id_t router_id);
 
 int worker_send_heartbeat(worker_state_t *worker);
@@ -141,7 +143,7 @@ int worker_send_execution_update(worker_state_t *worker, node_id_t router_id,
 
 // Worker registration
 int worker_register_with_router(worker_state_t *worker, const char *router_ip,
-                                uint16_t service_port, uint16_t data_port);
+                                uint16_t data_port);
 
 // DAG catalog sync
 int worker_sync_catalog_from_router(worker_state_t *worker, node_id_t router_id);
