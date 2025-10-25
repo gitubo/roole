@@ -22,6 +22,7 @@ typedef struct roole_config {
     node_ports_t ports;
     
     char routers[MAX_CONFIG_ROUTERS][MAX_CONFIG_STRING];
+    log_level_t log_level;
     size_t router_count;
 } roole_config_t;
 

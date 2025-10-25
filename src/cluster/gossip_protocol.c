@@ -66,7 +66,7 @@ ssize_t gossip_message_serialize(const gossip_message_t *msg, uint8_t *buffer, s
         memcpy(buffer + offset, &gossip_port_net, 2);
         offset += 2;
         
-        uint16_t service_port_net = htons(upd->service_port);
+        uint16_t service_port_net = htons(upd->gossip_port);
         memcpy(buffer + offset, &service_port_net, 2);
         offset += 2;
         
@@ -120,7 +120,7 @@ int gossip_message_deserialize(const uint8_t *buffer, size_t buffer_size, gossip
     
     // Piggyback updates
     for (uint8_t i = 0; i < msg->num_updates && i < GOSSIP_MAX_PIGGYBACK_UPDATES; i++) {
-        if (offset + 44 > buffer_size) {
+        if (offset + 40 > buffer_size) {
             LOG_WARN("Truncated gossip message, stopping at update %u", i);
             msg->num_updates = i;
             break;
@@ -148,7 +148,7 @@ int gossip_message_deserialize(const uint8_t *buffer, size_t buffer_size, gossip
         
         uint16_t service_port_net;
         memcpy(&service_port_net, buffer + offset, 2);
-        upd->service_port = ntohs(service_port_net);
+        upd->gossip_port = ntohs(service_port_net);
         offset += 2;
         
         uint64_t inc_net;
@@ -245,6 +245,6 @@ int gossip_deserialize_bootstrap_response(const uint8_t *buffer, size_t buffer_s
 size_t gossip_message_serialized_size(const gossip_message_t *msg) {
     if (!msg) return 0;
     
-    // Header (16 bytes) + updates (44 bytes each)
-    return 16 + (msg->num_updates * 44);
+    // Header (16 bytes) + updates (40 bytes each)
+    return 16 + (msg->num_updates * 40);
 }

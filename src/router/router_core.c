@@ -14,13 +14,12 @@
 // ============================================================================
 
 static void on_member_event(node_id_t node_id, node_type_t type,
-                           const char *ip, uint16_t port,
+                           const char *ip, uint16_t gossip_port, uint16_t data_port,
                            const char *event_type, void *user_data) {
     router_state_t *router = (router_state_t*)user_data;
 
     if (type == NODE_TYPE_WORKER) {
         if (strcmp(event_type, MEMBER_EVENT_JOIN) == 0) {
-            uint16_t data_port = port + 1;
             router_on_worker_join(router, node_id, ip, data_port);
         }
         else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 ||
@@ -94,7 +93,7 @@ int router_init(router_state_t *router, node_id_t router_id,
     }
     
     if (membership_init(&router->membership, router_id, NODE_TYPE_ROUTER,
-                       router->bind_addr, gossip_port) != RESULT_OK) {
+                       router->bind_addr, router->gossip_port, router->data_port) != RESULT_OK) {
         LOG_ERROR("Failed to initialize membership");
         cluster_view_destroy(&router->cluster_view);
         execution_tracker_destroy(&router->exec_tracker);
@@ -284,7 +283,7 @@ int router_on_worker_join(router_state_t *router, node_id_t worker_id,
                                     RPC_CHANNEL_DATA, 4096) == 0) {
                     LOG_INFO("DATA channel established to worker %u", worker_id);
                 } else {
-                    LOG_ERROR("Failed to connect DATA channel to worker %u", worker_id);
+                    LOG_ERROR("Failed to connect DATA channel to worker %u on port %u", worker_id, data_port);
                     safe_free(worker->data_channel);
                     worker->data_channel = NULL;
                 }

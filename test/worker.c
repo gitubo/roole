@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
     // Seed random number generator for load balancing
     srand(time(NULL) ^ getpid());
     
-    log_set_level(LOG_LEVEL_INFO);
+    log_set_level(config.log_level);
     
     LOG_INFO("========================================");
     LOG_INFO("Roole Worker Starting");
@@ -186,8 +186,8 @@ int main(int argc, char **argv) {
     
     LOG_INFO("========================================");
     LOG_INFO("Worker is now running");
-    LOG_INFO("  Message processing: %s:%u (DATA)", data_ip, data_port);
-    LOG_INFO("  Gossip: %s:%u (UDP)", gossip_ip, gossip_port);
+    LOG_INFO("  Data: %s:%u", data_ip, data_port);
+    LOG_INFO("  Service: %s:%u (Gossip)", gossip_ip, gossip_port);
     if (metrics_port > 0) {
         LOG_INFO("  Metrics: http://0.0.0.0:%u/metrics", metrics_port);
     }

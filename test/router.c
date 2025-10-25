@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
     
     // Set log level
-    log_set_level(LOG_LEVEL_INFO);
+    log_set_level(config.log_level);
     
     LOG_INFO("========================================");
     LOG_INFO("Roole Router Starting");

@@ -38,7 +38,7 @@ typedef struct gossip_member_update {
     node_type_t node_type;
     char ip_address[MAX_IP_LEN];
     uint16_t gossip_port;        // Port for gossip UDP
-    uint16_t service_port;       // Port for service RPC
+    uint16_t data_port;       // Port for service RPC
     node_status_t status;
     uint64_t incarnation;
     uint64_t timestamp_ms;       // When this update was created
@@ -119,7 +119,7 @@ gossip_engine_t* gossip_engine_init(
     node_type_t my_type,
     const char *bind_addr,
     uint16_t gossip_port,
-    uint16_t service_port,
+    uint16_t data_port,
     const gossip_config_t *config,
     cluster_view_t *cluster_view,
     member_event_cb event_callback,

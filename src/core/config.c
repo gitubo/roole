@@ -208,6 +208,22 @@ int config_load_from_file(const char *path, roole_config_t *config) {
             else if (strcasecmp(key, "ingress_addr") == 0 || strcasecmp(key, "ingress") == 0) {
                 safe_strncpy(config->ports.ingress_addr, value, MAX_CONFIG_STRING);
             }
+        }        
+        else if (strcasecmp(current_section, "Logging") == 0) {
+            if (strcasecmp(key, "level") == 0) {
+                if (strcasecmp(value, "DEBUG") == 0) {
+                    config->log_level = LOG_LEVEL_DEBUG;
+                } else if (strcasecmp(value, "INFO") == 0) {
+                    config->log_level = LOG_LEVEL_INFO;
+                } else if (strcasecmp(value, "WARN") == 0) {
+                    config->log_level = LOG_LEVEL_WARN;
+                } else if (strcasecmp(value, "ERROR") == 0) {
+                    config->log_level = LOG_LEVEL_ERROR;
+                } else {
+                    LOG_WARN("Unknown node type: %s", value);
+                    config->log_level = LOG_LEVEL_INFO;
+                }
+            }
         }
     }
     

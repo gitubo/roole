@@ -81,7 +81,7 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
     pthread_rwlock_unlock(&view->lock);
     
     LOG_INFO("Added member %u (%s:%u, type=%d)", 
-             member->node_id, member->ip_address, member->port, member->node_type);
+             member->node_id, member->ip_address, member->gossip_port, member->node_type);
     return RESULT_OK;
 }
 
@@ -197,7 +197,7 @@ size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
 // ============================================================================
 
 int membership_init(membership_handle_t **handle, node_id_t my_id, 
-                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port) {
+                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port, uint16_t data_port) {
     if (!handle) return RESULT_ERR_INVALID;
     
     membership_handle_t *h = safe_calloc(1, sizeof(membership_handle_t));
@@ -207,7 +207,7 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
     h->my_type = my_type;
     safe_strncpy(h->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
     h->gossip_port = gossip_port;
-    h->service_port = gossip_port;
+    h->data_port = data_port;
     h->shutdown_flag = 0;
     
     if (cluster_view_init(&h->internal_view, MAX_CLUSTER_NODES) != RESULT_OK) {
@@ -218,7 +218,8 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
     cluster_member_t self = {
         .node_id = my_id,
         .node_type = my_type,
-        .port = gossip_port,
+        .gossip_port = gossip_port,
+        .data_port = data_port,
         .status = NODE_STATUS_ALIVE,
         .incarnation = 0,
         .last_seen_ms = time_now_ms()
@@ -233,7 +234,7 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
         my_type,
         h->bind_addr,
         gossip_port,
-        gossip_port,
+        data_port,
         &gossip_config,
         &h->internal_view,
         NULL,

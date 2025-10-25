@@ -19,13 +19,12 @@
 // ============================================================================
 
 static void on_member_event(node_id_t node_id, node_type_t type,
-                           const char *ip, uint16_t port,
+                           const char *ip, uint16_t gossip_port, uint16_t data_port,
                            const char *event_type, void *user_data) {
     worker_state_t *worker = (worker_state_t*)user_data;
 
     if (type == NODE_TYPE_ROUTER) {
         if (strcmp(event_type, MEMBER_EVENT_JOIN) == 0) {
-            uint16_t data_port = port + 1;
             worker_add_router(worker, node_id, ip, data_port);
         }
         else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 ||
@@ -178,7 +177,7 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     }
     
     if (membership_init(&worker->membership, worker_id, NODE_TYPE_WORKER,
-                       worker->bind_addr, gossip_port) != RESULT_OK) {
+                       worker->bind_addr, worker->gossip_port, worker->data_port) != RESULT_OK) {
         LOG_ERROR("Failed to initialize membership");
         pthread_mutex_destroy(&worker->routers_lock);
         cluster_view_destroy(&worker->cluster_view);
@@ -309,7 +308,7 @@ int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *c
     join_msg.updates[0].incarnation = 0;
     safe_strncpy(join_msg.updates[0].ip_address, worker->bind_addr, MAX_IP_LEN);
     join_msg.updates[0].gossip_port = worker->gossip_port;
-    join_msg.updates[0].service_port = worker->data_port;
+    join_msg.updates[0].data_port = worker->data_port;
     
     int bootstrap_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (bootstrap_sock < 0) {
@@ -320,6 +319,9 @@ int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *c
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
     ssize_t msg_size = gossip_message_serialize(&join_msg, buffer, sizeof(buffer));
     
+    LOG_INFO("WORKER_JOIN serialized size: %zd bytes (num_updates=%u)", 
+         msg_size, join_msg.num_updates);
+
     struct sockaddr_in router_addr_in;
     memset(&router_addr_in, 0, sizeof(router_addr_in));
     router_addr_in.sin_family = AF_INET;

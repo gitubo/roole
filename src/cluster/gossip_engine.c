@@ -47,7 +47,7 @@ struct gossip_engine {
     node_type_t my_type;
     char my_ip[MAX_IP_LEN];
     uint16_t gossip_port;
-    uint16_t service_port;
+    uint16_t data_port;
     uint64_t incarnation;
     uint64_t sequence_num;
     
@@ -195,7 +195,7 @@ gossip_engine_t* gossip_engine_init(
     node_type_t my_type,
     const char *bind_addr,
     uint16_t gossip_port,
-    uint16_t service_port,
+    uint16_t data_port,
     const gossip_config_t *config,
     cluster_view_t *cluster_view,
     member_event_cb event_callback,
@@ -216,7 +216,7 @@ gossip_engine_t* gossip_engine_init(
     engine->my_type = my_type;
     safe_strncpy(engine->my_ip, bind_addr, MAX_IP_LEN);
     engine->gossip_port = gossip_port;
-    engine->service_port = service_port;
+    engine->data_port = data_port;
     engine->incarnation = 0;
     engine->sequence_num = 0;
     engine->cluster_view = cluster_view;
@@ -252,7 +252,7 @@ gossip_engine_t* gossip_engine_init(
         return NULL;
     }
     
-    LOG_INFO("Gossip engine initialized (node_id=%u, type=%d, port=%u)",
+    LOG_INFO("Gossip engine initialized (node_id=%u, type=%d, gossip_port=%u)",
              my_id, my_type, gossip_port);
     
     return engine;
@@ -276,11 +276,16 @@ static void handle_ping_message(gossip_engine_t *engine,
         cluster_member_t member = {
             .node_id = upd->node_id,
             .node_type = upd->node_type,
-            .port = upd->service_port,
+            .gossip_port = upd->gossip_port,
+            .data_port = upd->data_port,
             .status = upd->status,
             .incarnation = upd->incarnation
         };
-        safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
+        if (upd->node_id == msg->sender_id) {
+            safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
+        } else {
+            safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
+        }   
         
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
         if (existing) {
@@ -303,7 +308,7 @@ static void handle_ping_message(gossip_engine_t *engine,
                     
                     if (event_type) {
                         engine->event_callback(upd->node_id, upd->node_type,
-                                             upd->ip_address, upd->service_port,
+                                             upd->ip_address, upd->gossip_port, upd->data_port,
                                              event_type, engine->event_callback_data);
                     }
                 }
@@ -313,11 +318,11 @@ static void handle_ping_message(gossip_engine_t *engine,
             cluster_view_add(engine->cluster_view, &member);
             
             LOG_INFO("Discovered new member %u (%s:%u, type=%d)",
-                     upd->node_id, upd->ip_address, upd->service_port, upd->node_type);
+                     upd->node_id, member.ip_address, member.gossip_port, upd->node_type);
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->service_port,
+                                     upd->ip_address, upd->gossip_port, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
         }
@@ -362,7 +367,7 @@ static void handle_ack_message(gossip_engine_t *engine,
         
         if (engine->event_callback) {
             engine->event_callback(msg->sender_id, member->node_type,
-                                 member->ip_address, member->port,
+                                 member->ip_address, member->gossip_port, member->data_port,
                                  MEMBER_EVENT_UPDATE, engine->event_callback_data);
         }
     }
@@ -411,7 +416,7 @@ static void handle_suspect_message(gossip_engine_t *engine,
                 .status = NODE_STATUS_ALIVE,
                 .incarnation = engine->incarnation,
                 .gossip_port = engine->gossip_port,
-                .service_port = engine->service_port,
+                .data_port = engine->data_port,
                 .timestamp_ms = time_now_ms()
             };
             safe_strncpy(alive_update.ip_address, engine->my_ip, MAX_IP_LEN);
@@ -489,7 +494,7 @@ static void handle_dead_message(gossip_engine_t *engine,
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->service_port,
+                                     upd->ip_address, upd->gossip_port, upd->data_port,
                                      MEMBER_EVENT_LEAVE, engine->event_callback_data);
             }
             
@@ -512,20 +517,21 @@ static void handle_join_message(gossip_engine_t *engine,
             cluster_member_t member = {
                 .node_id = upd->node_id,
                 .node_type = upd->node_type,
-                .port = upd->service_port,
+                .gossip_port = upd->gossip_port,
+                .data_port = upd->data_port,
                 .status = NODE_STATUS_ALIVE,
                 .incarnation = upd->incarnation
             };
-            safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
-            
+            safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
+        
             cluster_view_add(engine->cluster_view, &member);
             
             LOG_INFO("Added new member %u (%s:%u, type=%d)",
-                     upd->node_id, upd->ip_address, upd->service_port, upd->node_type);
+                     upd->node_id, upd->ip_address, upd->gossip_port, upd->node_type);
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->service_port,
+                                     upd->ip_address, upd->gossip_port, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
             
@@ -560,11 +566,12 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         cluster_member_t member = {
             .node_id = upd->node_id,
             .node_type = NODE_TYPE_WORKER,
-            .port = upd->service_port,
+            .gossip_port = upd->gossip_port,
+            .data_port = upd->data_port,
             .status = NODE_STATUS_ALIVE,
             .incarnation = upd->incarnation
         };
-        safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
+        safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
         
         cluster_view_add(engine->cluster_view, &member);
         
@@ -573,7 +580,7 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         // Trigger event callback
         if (engine->event_callback) {
             engine->event_callback(upd->node_id, NODE_TYPE_WORKER,
-                                 upd->ip_address, upd->service_port,
+                                 src_ip, upd->gossip_port, upd->data_port,
                                  MEMBER_EVENT_JOIN, engine->event_callback_data);
         }
     }
@@ -595,11 +602,11 @@ static void handle_worker_join_message(gossip_engine_t *engine,
             
             // Reconstruct gossip and data addresses
             snprintf(bootstrap_resp.routers[bootstrap_resp.num_routers].gossip_addr,
-                    MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->port);
+                    MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->gossip_port);
             
-            // Data port = service_port + 1 (convention)
+            // Data port
             snprintf(bootstrap_resp.routers[bootstrap_resp.num_routers].data_addr,
-                    MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->port + 1);
+                    MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->data_port);
             
             bootstrap_resp.num_routers++;
         }
@@ -726,6 +733,8 @@ static void* gossip_listener_thread(void *arg) {
             usleep(10000);
             continue;
         }
+
+        LOG_INFO("Received %zd bytes from %s:%u", received, src_ip, src_port); 
         
         if (received < 16) {
             LOG_WARN("Received malformed gossip packet (too small: %zd bytes)", received);
@@ -803,7 +812,7 @@ static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
     }
     
     char target_ip[MAX_IP_LEN];
-    uint16_t target_gossip_port = target->port;
+    uint16_t target_gossip_port = target->gossip_port;
     safe_strncpy(target_ip, target->ip_address, MAX_IP_LEN);
     
     cluster_view_release(engine->cluster_view);
@@ -862,7 +871,8 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
             node_id_t node_id = member->node_id;
             node_type_t node_type = member->node_type;
             char ip[MAX_IP_LEN];
-            uint16_t port = member->port;
+            uint16_t gossip_port = member->gossip_port;
+            uint16_t data_port = member->data_port;
             safe_strncpy(ip, member->ip_address, MAX_IP_LEN);
             
             pthread_rwlock_unlock(&engine->cluster_view->lock);
@@ -885,7 +895,7 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
             update_queue_push(&engine->update_queue, &dead_update);
             
             if (engine->event_callback) {
-                engine->event_callback(node_id, node_type, ip, port,
+                engine->event_callback(node_id, node_type, ip, gossip_port, data_port,
                                      MEMBER_EVENT_LEAVE, 
                                      engine->event_callback_data);
             }
@@ -935,7 +945,7 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
         if (!peer) continue;
         
         char peer_ip[MAX_IP_LEN];
-        uint16_t peer_gossip_port = peer->port;
+        uint16_t peer_gossip_port = peer->gossip_port;
         safe_strncpy(peer_ip, peer->ip_address, MAX_IP_LEN);
         
         cluster_view_release(engine->cluster_view);
@@ -959,7 +969,7 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
             gossip_msg.updates[0].status = NODE_STATUS_ALIVE;
             gossip_msg.updates[0].incarnation = engine->incarnation;
             gossip_msg.updates[0].gossip_port = engine->gossip_port;
-            gossip_msg.updates[0].service_port = engine->service_port;
+            gossip_msg.updates[0].data_port = engine->data_port;
             gossip_msg.updates[0].timestamp_ms = time_now_ms();
             safe_strncpy(gossip_msg.updates[0].ip_address, engine->my_ip, MAX_IP_LEN);
             gossip_msg.num_updates = 1;
@@ -1121,7 +1131,7 @@ int gossip_engine_add_seed(gossip_engine_t *engine, const char *ip, uint16_t gos
     join_msg.updates[0].status = NODE_STATUS_ALIVE;
     join_msg.updates[0].incarnation = engine->incarnation;
     join_msg.updates[0].gossip_port = engine->gossip_port;
-    join_msg.updates[0].service_port = engine->service_port;
+    join_msg.updates[0].data_port = engine->data_port;
     join_msg.updates[0].timestamp_ms = time_now_ms();
     safe_strncpy(join_msg.updates[0].ip_address, engine->my_ip, MAX_IP_LEN);
     
@@ -1147,7 +1157,8 @@ int gossip_engine_announce_join(gossip_engine_t *engine) {
     cluster_member_t self = {
         .node_id = engine->my_id,
         .node_type = engine->my_type,
-        .port = engine->service_port,
+        .gossip_port = engine->gossip_port,
+        .data_port = engine->data_port,
         .status = NODE_STATUS_ALIVE,
         .incarnation = engine->incarnation,
         .last_seen_ms = time_now_ms()
@@ -1162,7 +1173,7 @@ int gossip_engine_announce_join(gossip_engine_t *engine) {
         .status = NODE_STATUS_ALIVE,
         .incarnation = engine->incarnation,
         .gossip_port = engine->gossip_port,
-        .service_port = engine->service_port,
+        .data_port = engine->data_port,
         .timestamp_ms = time_now_ms()
     };
     safe_strncpy(join_update.ip_address, engine->my_ip, MAX_IP_LEN);
@@ -1202,7 +1213,7 @@ int gossip_engine_leave(gossip_engine_t *engine) {
         
         if (member->node_id == engine->my_id) continue;
         
-        uint16_t peer_gossip_port = member->port;
+        uint16_t peer_gossip_port = member->gossip_port;
         
         uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
         ssize_t msg_size = gossip_message_serialize(&leave_msg, buffer, sizeof(buffer));

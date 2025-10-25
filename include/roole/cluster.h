@@ -36,7 +36,8 @@ typedef struct cluster_member {
     node_id_t node_id;
     node_type_t node_type;
     char ip_address[MAX_IP_LEN];
-    uint16_t port;
+    uint16_t gossip_port;
+    uint16_t data_port;
     node_status_t status;
     uint64_t last_seen_ms;
     uint64_t incarnation;
@@ -74,7 +75,7 @@ size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
 
 // Callback for membership events
 typedef void (*member_event_cb)(node_id_t node_id, node_type_t type, 
-                                const char *ip, uint16_t port,
+                                const char *ip, uint16_t gossip_port, uint16_t data_port,
                                 const char *event_type, void *user_data);
 
 typedef struct membership_handle {
@@ -82,7 +83,7 @@ typedef struct membership_handle {
     node_type_t my_type;
     char bind_addr[MAX_IP_LEN];
     uint16_t gossip_port;
-    uint16_t service_port;
+    uint16_t data_port;
     
     cluster_view_t internal_view;
     
@@ -102,7 +103,7 @@ typedef struct membership_handle {
 
 // Membership API
 int membership_init(membership_handle_t **handle, node_id_t my_id, 
-                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port);
+                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port, uint16_t data_port);
 int membership_join(membership_handle_t *handle, const char *seed_addr, uint16_t seed_port);
 int membership_set_callback(membership_handle_t *handle, member_event_cb callback, void *user_data);
 int membership_leave(membership_handle_t *handle);

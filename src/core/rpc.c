@@ -214,7 +214,7 @@ int rpc_client_connect(rpc_channel_t *channel, const char *ip, uint16_t port,
     }
 
     if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
-        LOG_ERROR("rpc_client_connect: connect failed");
+        LOG_ERROR("rpc_client_connect: connect to %s:%u failed", ip, port);
         rpc_channel_destroy(channel);
         return -1;
     }
