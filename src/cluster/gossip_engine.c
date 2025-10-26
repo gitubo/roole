@@ -1,4 +1,5 @@
 // src/cluster/gossip_engine.c - SWIM gossip protocol engine
+// FIX: UDP listener was blocking after initial messages due to incorrect socket handling
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -11,8 +12,11 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>
 
 // Forward declarations from gossip_transport.c
 int gossip_create_udp_socket(const char *bind_addr, uint16_t port);
@@ -269,7 +273,7 @@ static void handle_ping_message(gossip_engine_t *engine,
     LOG_DEBUG("Received PING from node %u (%s:%u)", 
               msg->sender_id, src_ip, src_port);
     
-    // Process piggyback updates
+    // Process piggyback updates - CRITICAL: avoid lock upgrade deadlock
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
@@ -281,42 +285,28 @@ static void handle_ping_message(gossip_engine_t *engine,
             .status = upd->status,
             .incarnation = upd->incarnation
         };
+        
         if (upd->node_id == msg->sender_id) {
             safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
         } else {
             safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
-        }   
+        }
         
+        // Check if exists WITHOUT holding lock for next operation
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
+        int should_add = (existing == NULL);
+        int should_update = 0;
+        node_status_t old_status = NODE_STATUS_ALIVE;
+        
         if (existing) {
-            if (upd->incarnation > existing->incarnation) {
-                cluster_view_update_status(engine->cluster_view, upd->node_id,
-                                          upd->status, upd->incarnation);
-                
-                LOG_INFO("Updated node %u status to %d (incarnation %lu)",
-                         upd->node_id, upd->status, upd->incarnation);
-                
-                if (upd->status != existing->status && engine->event_callback) {
-                    const char *event_type = NULL;
-                    if (upd->status == NODE_STATUS_SUSPECT) {
-                        event_type = MEMBER_EVENT_FAILED;
-                    } else if (upd->status == NODE_STATUS_DEAD) {
-                        event_type = MEMBER_EVENT_LEAVE;
-                    } else if (upd->status == NODE_STATUS_ALIVE) {
-                        event_type = MEMBER_EVENT_UPDATE;
-                    }
-                    
-                    if (event_type) {
-                        engine->event_callback(upd->node_id, upd->node_type,
-                                             upd->ip_address, upd->gossip_port, upd->data_port,
-                                             event_type, engine->event_callback_data);
-                    }
-                }
-            }
-            cluster_view_release(engine->cluster_view);
-        } else {
+            old_status = existing->status;
+            should_update = (upd->incarnation > existing->incarnation);
+            cluster_view_release(engine->cluster_view);  // MUST release before add/update!
+        }
+        
+        // Now perform operations without holding previous locks
+        if (should_add) {
             cluster_view_add(engine->cluster_view, &member);
-            
             LOG_INFO("Discovered new member %u (%s:%u, type=%d)",
                      upd->node_id, member.ip_address, member.gossip_port, upd->node_type);
             
@@ -324,6 +314,29 @@ static void handle_ping_message(gossip_engine_t *engine,
                 engine->event_callback(upd->node_id, upd->node_type,
                                      upd->ip_address, upd->gossip_port, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
+            }
+        } else if (should_update) {
+            cluster_view_update_status(engine->cluster_view, upd->node_id,
+                                      upd->status, upd->incarnation);
+            
+            LOG_INFO("Updated node %u status to %d (incarnation %lu)",
+                     upd->node_id, upd->status, upd->incarnation);
+            
+            if (upd->status != old_status && engine->event_callback) {
+                const char *event_type = NULL;
+                if (upd->status == NODE_STATUS_SUSPECT) {
+                    event_type = MEMBER_EVENT_FAILED;
+                } else if (upd->status == NODE_STATUS_DEAD) {
+                    event_type = MEMBER_EVENT_LEAVE;
+                } else if (upd->status == NODE_STATUS_ALIVE) {
+                    event_type = MEMBER_EVENT_UPDATE;
+                }
+                
+                if (event_type) {
+                    engine->event_callback(upd->node_id, upd->node_type,
+                                         upd->ip_address, upd->gossip_port, upd->data_port,
+                                         event_type, engine->event_callback_data);
+                }
             }
         }
     }
@@ -359,35 +372,53 @@ static void handle_ack_message(gossip_engine_t *engine,
     
     remove_pending_ack(engine, msg->sender_id);
     
+    // Check if sender was suspect - AVOID lock upgrade deadlock
     cluster_member_t *member = cluster_view_get(engine->cluster_view, msg->sender_id);
-    if (member && member->status == NODE_STATUS_SUSPECT) {
+    int was_suspect = 0;
+    uint64_t incarnation = 0;
+    node_type_t node_type = NODE_TYPE_UNKNOWN;
+    char ip[MAX_IP_LEN] = {0};
+    uint16_t gossip_port = 0;
+    uint16_t data_port = 0;
+    
+    if (member) {
+        was_suspect = (member->status == NODE_STATUS_SUSPECT);
+        incarnation = member->incarnation;
+        node_type = member->node_type;
+        safe_strncpy(ip, member->ip_address, MAX_IP_LEN);
+        gossip_port = member->gossip_port;
+        data_port = member->data_port;
+        cluster_view_release(engine->cluster_view);  // Release before update!
+    }
+    
+    if (was_suspect) {
         LOG_INFO("Node %u recovered (was SUSPECT, now ALIVE)", msg->sender_id);
         cluster_view_update_status(engine->cluster_view, msg->sender_id,
-                                  NODE_STATUS_ALIVE, member->incarnation);
+                                  NODE_STATUS_ALIVE, incarnation);
         
         if (engine->event_callback) {
-            engine->event_callback(msg->sender_id, member->node_type,
-                                 member->ip_address, member->gossip_port, member->data_port,
+            engine->event_callback(msg->sender_id, node_type, ip, gossip_port, data_port,
                                  MEMBER_EVENT_UPDATE, engine->event_callback_data);
         }
     }
-    if (member) {
-        cluster_view_release(engine->cluster_view);
-    }
     
-    // Process piggyback updates
+    // Process piggyback updates - same deadlock avoidance
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
+        int should_update = 0;
+        
         if (existing) {
-            if (upd->incarnation > existing->incarnation) {
-                cluster_view_update_status(engine->cluster_view, upd->node_id,
-                                          upd->status, upd->incarnation);
-                LOG_DEBUG("Updated node %u from piggyback (status=%d)", 
-                          upd->node_id, upd->status);
-            }
-            cluster_view_release(engine->cluster_view);
+            should_update = (upd->incarnation > existing->incarnation);
+            cluster_view_release(engine->cluster_view);  // Release!
+        }
+        
+        if (should_update) {
+            cluster_view_update_status(engine->cluster_view, upd->node_id,
+                                      upd->status, upd->incarnation);
+            LOG_DEBUG("Updated node %u from piggyback (status=%d)", 
+                      upd->node_id, upd->status);
         }
     }
 }
@@ -425,21 +456,25 @@ static void handle_suspect_message(gossip_engine_t *engine,
                 update_queue_push(&engine->update_queue, &alive_update);
             }
             
-        } else {
+        } else if (upd->node_id != engine->my_id) {  // CRITICAL FIX: Don't mark ourselves!
+            // Check if we should mark as suspect - AVOID deadlock
             cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
+            int should_suspect = 0;
+            
             if (existing) {
-                if (upd->incarnation >= existing->incarnation && 
-                    existing->status == NODE_STATUS_ALIVE) {
-                    
-                    cluster_view_update_status(engine->cluster_view, upd->node_id,
-                                              NODE_STATUS_SUSPECT, upd->incarnation);
-                    
-                    LOG_INFO("Marking node %u as SUSPECT (based on gossip from %u)",
-                             upd->node_id, msg->sender_id);
-                    
-                    update_queue_push(&engine->update_queue, upd);
-                }
-                cluster_view_release(engine->cluster_view);
+                should_suspect = (upd->incarnation >= existing->incarnation && 
+                                 existing->status == NODE_STATUS_ALIVE);
+                cluster_view_release(engine->cluster_view);  // Release!
+            }
+            
+            if (should_suspect) {
+                cluster_view_update_status(engine->cluster_view, upd->node_id,
+                                          NODE_STATUS_SUSPECT, upd->incarnation);
+                
+                LOG_INFO("Marking node %u as SUSPECT (based on gossip from %u)",
+                         upd->node_id, msg->sender_id);
+                
+                update_queue_push(&engine->update_queue, upd);
             }
         }
     }
@@ -457,18 +492,23 @@ static void handle_alive_message(gossip_engine_t *engine,
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
+        // Check if should update - AVOID deadlock
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
+        int should_update = 0;
+        
         if (existing) {
-            if (upd->incarnation > existing->incarnation) {
-                cluster_view_update_status(engine->cluster_view, upd->node_id,
-                                          NODE_STATUS_ALIVE, upd->incarnation);
-                
-                LOG_INFO("Node %u refuted suspicion (new incarnation=%lu)",
-                         upd->node_id, upd->incarnation);
-                
-                update_queue_push(&engine->update_queue, upd);
-            }
-            cluster_view_release(engine->cluster_view);
+            should_update = (upd->incarnation > existing->incarnation);
+            cluster_view_release(engine->cluster_view);  // Release!
+        }
+        
+        if (should_update) {
+            cluster_view_update_status(engine->cluster_view, upd->node_id,
+                                      NODE_STATUS_ALIVE, upd->incarnation);
+            
+            LOG_INFO("Node %u refuted suspicion (new incarnation=%lu)",
+                     upd->node_id, upd->incarnation);
+            
+            update_queue_push(&engine->update_queue, upd);
         }
     }
 }
@@ -485,20 +525,32 @@ static void handle_dead_message(gossip_engine_t *engine,
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
+        // Get member info before updating - AVOID deadlock
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
+        int should_update = (existing != NULL);
+        node_type_t node_type = NODE_TYPE_UNKNOWN;
+        char ip[MAX_IP_LEN] = {0};
+        uint16_t gossip_port = 0;
+        uint16_t data_port = 0;
+        
         if (existing) {
+            node_type = existing->node_type;
+            safe_strncpy(ip, existing->ip_address, MAX_IP_LEN);
+            gossip_port = existing->gossip_port;
+            data_port = existing->data_port;
+            cluster_view_release(engine->cluster_view);  // Release!
+        }
+        
+        if (should_update) {
             cluster_view_update_status(engine->cluster_view, upd->node_id,
                                       NODE_STATUS_DEAD, upd->incarnation);
             
             LOG_INFO("Node %u marked as DEAD", upd->node_id);
             
             if (engine->event_callback) {
-                engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->gossip_port, upd->data_port,
+                engine->event_callback(upd->node_id, node_type, ip, gossip_port, data_port,
                                      MEMBER_EVENT_LEAVE, engine->event_callback_data);
             }
-            
-            cluster_view_release(engine->cluster_view);
         }
     }
 }
@@ -712,7 +764,7 @@ static void dispatch_message(gossip_engine_t *engine,
 }
 
 // ============================================================================
-// UDP LISTENER THREAD
+// UDP LISTENER THREAD - FIXED: Use select() with timeout to prevent blocking
 // ============================================================================
 
 static void* gossip_listener_thread(void *arg) {
@@ -724,17 +776,53 @@ static void* gossip_listener_thread(void *arg) {
     char src_ip[MAX_IP_LEN];
     uint16_t src_port;
     
+    // Set up select() for non-blocking receive with timeout
+    fd_set read_fds;
+    struct timeval tv;
+    
     while (!engine->shutdown_flag) {
+        FD_ZERO(&read_fds);
+        FD_SET(engine->udp_socket, &read_fds);
+        
+        // Timeout: 50ms - this prevents blocking forever and allows frequent checking
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+        
+        int ret = select(engine->udp_socket + 1, &read_fds, NULL, NULL, &tv);
+        
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            LOG_ERROR("select() failed: %s", strerror(errno));
+            usleep(10000);
+            continue;
+        }
+        
+        if (ret == 0) {
+            // Timeout - no data available, continue loop
+            continue;
+        }
+        
+        // Data is available, read it
         ssize_t received = gossip_recv_udp(engine->udp_socket, recv_buffer,
                                           sizeof(recv_buffer), src_ip,
                                           sizeof(src_ip), &src_port);
         
         if (received < 0) {
+            // EAGAIN/EWOULDBLOCK should not happen after select(), but handle it
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            LOG_ERROR("gossip_recv_udp failed: %s", strerror(errno));
             usleep(10000);
             continue;
         }
+        
+        if (received == 0) {
+            // Connection closed (shouldn't happen with UDP)
+            continue;
+        }
 
-        LOG_INFO("Received %zd bytes from %s:%u", received, src_ip, src_port); 
+        LOG_DEBUG("UDP received %zd bytes from %s:%u", received, src_ip, src_port); 
         
         if (received < 16) {
             LOG_WARN("Received malformed gossip packet (too small: %zd bytes)", received);
@@ -764,6 +852,7 @@ static void* gossip_listener_thread(void *arg) {
                   (msg.msg_type == GOSSIP_MSG_LEAVE) ? "LEAVE" : "UNKNOWN",
                   msg.sender_id, src_ip, src_port, msg.sequence_num, msg.num_updates);
         
+        // CRITICAL: Process message immediately without blocking
         dispatch_message(engine, &msg, src_ip, src_port);
     }
     
@@ -784,8 +873,10 @@ static node_id_t select_random_peer(gossip_engine_t *engine) {
     for (size_t i = 0; i < engine->cluster_view->count; i++) {
         cluster_member_t *member = &engine->cluster_view->members[i];
         
+        // CRITICAL FIX: Include SUSPECT nodes in PING selection!
+        // Only exclude ourselves and DEAD nodes
         if (member->node_id == engine->my_id || 
-            member->status != NODE_STATUS_ALIVE) {
+            member->status == NODE_STATUS_DEAD) {
             continue;
         }
         

@@ -1,4 +1,7 @@
 // src/cluster/gossip_protocol.c - Message serialization/deserialization
+// FIXES:
+// 1. Serialize data_port correctly instead of gossip_port twice
+// 2. Deserialize data_port correctly
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -66,8 +69,9 @@ ssize_t gossip_message_serialize(const gossip_message_t *msg, uint8_t *buffer, s
         memcpy(buffer + offset, &gossip_port_net, 2);
         offset += 2;
         
-        uint16_t service_port_net = htons(upd->gossip_port);
-        memcpy(buffer + offset, &service_port_net, 2);
+        // FIX: Serialize data_port, not gossip_port again
+        uint16_t data_port_net = htons(upd->data_port);
+        memcpy(buffer + offset, &data_port_net, 2);
         offset += 2;
         
         uint64_t inc_net = htobe64(upd->incarnation);
@@ -146,9 +150,10 @@ int gossip_message_deserialize(const uint8_t *buffer, size_t buffer_size, gossip
         upd->gossip_port = ntohs(gossip_port_net);
         offset += 2;
         
-        uint16_t service_port_net;
-        memcpy(&service_port_net, buffer + offset, 2);
-        upd->gossip_port = ntohs(service_port_net);
+        // FIX: Deserialize data_port correctly
+        uint16_t data_port_net;
+        memcpy(&data_port_net, buffer + offset, 2);
+        upd->data_port = ntohs(data_port_net);
         offset += 2;
         
         uint64_t inc_net;

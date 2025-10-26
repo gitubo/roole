@@ -1,4 +1,7 @@
 // src/worker/worker_metrics.c
+// FIXES:
+// 1. LOF_INFO -> LOG_INFO
+// 2. LOG_ERROR_C -> LOG_ERROR
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -52,14 +55,14 @@ struct worker_metrics {
 static void* metrics_http_server_thread(void *arg) {
     worker_metrics_t *metrics = (worker_metrics_t*)arg;
     
-    LOF_INFO("WORKER", "Metrics HTTP server starting on port %u", metrics->metrics_port);
+    LOG_INFO("Metrics HTTP server starting on port %u", metrics->metrics_port);
     
     // Start Prometheus HTTP server (blocking)
     // This serves GET /metrics automatically
     int result = promhttp_start_daemon(metrics->metrics_port, NULL);
     
     if (result != 0) {
-        LOG_ERROR_C("WORKER", "Failed to start metrics HTTP server on port %u", 
+        LOG_ERROR("Failed to start metrics HTTP server on port %u", 
                     metrics->metrics_port);
     }
     
@@ -73,7 +76,7 @@ static void* metrics_http_server_thread(void *arg) {
 worker_metrics_t* worker_metrics_init(node_id_t worker_id, uint16_t metrics_port) {
     worker_metrics_t *m = calloc(1, sizeof(worker_metrics_t));
     if (!m) {
-        LOG_ERROR_C("WORKER", "Failed to allocate metrics structure");
+        LOG_ERROR("Failed to allocate metrics structure");
         return NULL;
     }
     
@@ -85,7 +88,7 @@ worker_metrics_t* worker_metrics_init(node_id_t worker_id, uint16_t metrics_port
     // Initialize Prometheus collector registry
     m->registry = prom_collector_registry_default();
     if (!m->registry) {
-        LOG_ERROR_C("WORKER", "Failed to get Prometheus registry");
+        LOG_ERROR("Failed to get Prometheus registry");
         free(m);
         return NULL;
     }
@@ -189,15 +192,15 @@ worker_metrics_t* worker_metrics_init(node_id_t worker_id, uint16_t metrics_port
     // ========================================================================
     
     if (pthread_create(&m->http_thread, NULL, metrics_http_server_thread, m) != 0) {
-        LOG_ERROR_C("WORKER", "Failed to start metrics HTTP server thread");
+        LOG_ERROR("Failed to start metrics HTTP server thread");
         // Continue anyway - metrics collection still works, just no HTTP endpoint
     } else {
         pthread_detach(m->http_thread);
     }
     
-    LOF_INFO("WORKER", "Metrics initialized (worker_id=%u, port=%u)", 
+    LOG_INFO("Metrics initialized (worker_id=%u, port=%u)", 
                worker_id, metrics_port);
-    LOF_INFO("WORKER", "Metrics available at http://0.0.0.0:%u/metrics", metrics_port);
+    LOG_INFO("Metrics available at http://0.0.0.0:%u/metrics", metrics_port);
     
     return m;
 }
@@ -210,7 +213,7 @@ void worker_metrics_shutdown(worker_metrics_t *metrics) {
     // Note: promhttp doesn't provide clean shutdown, so we just detach the thread
     // In production, you'd want to add proper shutdown handling
     
-    LOF_INFO("WORKER", "Metrics subsystem shutdown");
+    LOG_INFO("Metrics subsystem shutdown");
     free(metrics);
 }
 
