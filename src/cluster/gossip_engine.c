@@ -436,6 +436,7 @@ static void handle_suspect_message(gossip_engine_t *engine,
         const gossip_member_update_t *upd = &msg->updates[i];
         
         if (upd->node_id == engine->my_id && upd->status == NODE_STATUS_SUSPECT) {
+            // Someone suspects US - refute with higher incarnation
             engine->incarnation++;
             
             LOG_WARN("Refuting suspicion (node %u suspected us), new incarnation=%lu",
@@ -455,8 +456,7 @@ static void handle_suspect_message(gossip_engine_t *engine,
             for (int j = 0; j < 3; j++) {
                 update_queue_push(&engine->update_queue, &alive_update);
             }
-            
-        } else if (upd->node_id != engine->my_id) {  // CRITICAL FIX: Don't mark ourselves!
+        } else if (upd->node_id != engine->my_id && upd->status == NODE_STATUS_SUSPECT) {  // FIX: Only suspect others
             // Check if we should mark as suspect - AVOID deadlock
             cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
             int should_suspect = 0;
@@ -464,7 +464,7 @@ static void handle_suspect_message(gossip_engine_t *engine,
             if (existing) {
                 should_suspect = (upd->incarnation >= existing->incarnation && 
                                  existing->status == NODE_STATUS_ALIVE);
-                cluster_view_release(engine->cluster_view);  // Release!
+                cluster_view_release(engine->cluster_view);
             }
             
             if (should_suspect) {
@@ -635,6 +635,58 @@ static void handle_worker_join_message(gossip_engine_t *engine,
                                  src_ip, upd->gossip_port, upd->data_port,
                                  MEMBER_EVENT_JOIN, engine->event_callback_data);
         }
+        
+        // =================================================================
+        // FIX: ACTIVELY PROPAGATE join to existing cluster members
+        // =================================================================
+        
+        gossip_member_update_t join_update = *upd;
+        safe_strncpy(join_update.ip_address, src_ip, MAX_IP_LEN);
+        join_update.timestamp_ms = time_now_ms();
+        
+        // Queue for background gossip (5x for redundancy)
+        for (int i = 0; i < 5; i++) {
+            update_queue_push(&engine->update_queue, &join_update);
+        }
+        
+        // Immediate gossip burst to all existing members
+        pthread_rwlock_rdlock(&engine->cluster_view->lock);
+        
+        for (size_t i = 0; i < engine->cluster_view->count; i++) {
+            cluster_member_t *peer = &engine->cluster_view->members[i];
+            
+            // Skip self, joining node, and dead nodes
+            if (peer->node_id == engine->my_id || 
+                peer->node_id == upd->node_id ||
+                peer->status == NODE_STATUS_DEAD) {
+                continue;
+            }
+            
+            // Build immediate gossip with join announcement
+            gossip_message_t immediate_gossip = {
+                .version = 1,
+                .msg_type = GOSSIP_MSG_ALIVE,
+                .sender_id = engine->my_id,
+                .sequence_num = __sync_fetch_and_add(&engine->sequence_num, 1),
+                .num_updates = 1
+            };
+            immediate_gossip.updates[0] = join_update;
+            
+            // Send UDP gossip immediately (don't wait for next round)
+            uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
+            ssize_t msg_size = gossip_message_serialize(&immediate_gossip, 
+                                                        buffer, sizeof(buffer));
+            if (msg_size > 0) {
+                gossip_send_udp(engine->udp_socket, buffer, msg_size,
+                               peer->ip_address, peer->gossip_port);
+                LOG_INFO("Immediately gossiped Worker %u join to node %u", 
+                         upd->node_id, peer->node_id);
+            }
+        }
+        
+        pthread_rwlock_unlock(&engine->cluster_view->lock);
+        
+        LOG_INFO("Join propagation initiated for Worker %u", upd->node_id);
     }
     
     // Build bootstrap response with list of active ROUTERS
@@ -652,11 +704,9 @@ static void handle_worker_join_message(gossip_engine_t *engine,
             
             bootstrap_resp.routers[bootstrap_resp.num_routers].node_id = m->node_id;
             
-            // Reconstruct gossip and data addresses
             snprintf(bootstrap_resp.routers[bootstrap_resp.num_routers].gossip_addr,
                     MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->gossip_port);
             
-            // Data port
             snprintf(bootstrap_resp.routers[bootstrap_resp.num_routers].data_addr,
                     MAX_CONFIG_STRING, "%s:%u", m->ip_address, m->data_port);
             
@@ -998,10 +1048,15 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
     pthread_rwlock_unlock(&engine->cluster_view->lock);
 }
 
+// ============================================================================
+// GOSSIP TO RANDOM PEERS (Piggybacking state updates)
+// ============================================================================
+
 static void gossip_to_random_peers(gossip_engine_t *engine) {
     node_id_t peer_list[MAX_CLUSTER_NODES];
     size_t peer_count = 0;
     
+    // Build list of potential gossip targets (exclude self and dead nodes)
     pthread_rwlock_rdlock(&engine->cluster_view->lock);
     
     for (size_t i = 0; i < engine->cluster_view->count; i++) {
@@ -1019,19 +1074,23 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
     
     pthread_rwlock_unlock(&engine->cluster_view->lock);
     
+    // No peers to gossip to
     if (peer_count == 0) {
         return;
     }
     
+    // Determine fanout (how many peers to gossip to)
     size_t fanout = (peer_count < engine->config.fanout) ? 
                     peer_count : engine->config.fanout;
     
+    // Select random peers using Fisher-Yates shuffle
     for (size_t i = 0; i < fanout; i++) {
         size_t j = i + (rand() % (peer_count - i));
         node_id_t temp = peer_list[i];
         peer_list[i] = peer_list[j];
         peer_list[j] = temp;
         
+        // Get peer information
         cluster_member_t *peer = cluster_view_get(engine->cluster_view, peer_list[i]);
         if (!peer) continue;
         
@@ -1041,31 +1100,28 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
         
         cluster_view_release(engine->cluster_view);
         
+        // Build gossip message
         gossip_message_t gossip_msg = {
             .version = 1,
-            .msg_type = GOSSIP_MSG_SUSPECT,
+            .msg_type = GOSSIP_MSG_SUSPECT,  // Generic gossip message type
             .flags = 0,
             .sender_id = engine->my_id,
             .sequence_num = __sync_fetch_and_add(&engine->sequence_num, 1),
             .num_updates = 0
         };
         
+        // Pop updates from queue to piggyback
         gossip_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
                                                         gossip_msg.updates,
                                                         engine->config.max_piggyback);
         
+        // FIX: Only gossip if we have real updates
+        // Don't create artificial keepalive updates - let PING/ACK handle liveness
         if (gossip_msg.num_updates == 0) {
-            gossip_msg.updates[0].node_id = engine->my_id;
-            gossip_msg.updates[0].node_type = engine->my_type;
-            gossip_msg.updates[0].status = NODE_STATUS_ALIVE;
-            gossip_msg.updates[0].incarnation = engine->incarnation;
-            gossip_msg.updates[0].gossip_port = engine->gossip_port;
-            gossip_msg.updates[0].data_port = engine->data_port;
-            gossip_msg.updates[0].timestamp_ms = time_now_ms();
-            safe_strncpy(gossip_msg.updates[0].ip_address, engine->my_ip, MAX_IP_LEN);
-            gossip_msg.num_updates = 1;
+            continue;  // Skip this peer if no state changes to propagate
         }
         
+        // Serialize and send
         uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
         ssize_t msg_size = gossip_message_serialize(&gossip_msg, buffer, sizeof(buffer));
         if (msg_size > 0) {
