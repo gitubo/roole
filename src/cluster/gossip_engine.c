@@ -17,6 +17,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdbool.h>
 
 // Forward declarations from gossip_transport.c
 int gossip_create_udp_socket(const char *bind_addr, uint16_t port);
@@ -173,15 +174,32 @@ static void check_ack_timeouts(gossip_engine_t *engine) {
             LOG_WARN("ACK timeout for node %u (no response after %lums)", 
                      node, elapsed);
             
-            cluster_view_update_status(engine->cluster_view, node, 
-                                      NODE_STATUS_SUSPECT, 0);
+            // Get current status before updating
+            cluster_member_t *member = cluster_view_get(engine->cluster_view, node);
+            node_status_t old_status = NODE_STATUS_ALIVE;
+            uint64_t incarnation = 0;
             
-            gossip_member_update_t update = {
-                .node_id = node,
-                .status = NODE_STATUS_SUSPECT,
-                .timestamp_ms = now
-            };
-            update_queue_push(&engine->update_queue, &update);
+            if (member) {
+                old_status = member->status;
+                incarnation = member->incarnation;
+                cluster_view_release(engine->cluster_view);
+            }
+            
+            // Only mark as SUSPECT if currently ALIVE
+            if (old_status == NODE_STATUS_ALIVE) {
+                cluster_view_update_status(engine->cluster_view, node, 
+                                          NODE_STATUS_SUSPECT, incarnation);
+                
+                LOG_INFO("Node %u marked as SUSPECT (ACK timeout)", node);
+                
+                gossip_member_update_t update = {
+                    .node_id = node,
+                    .status = NODE_STATUS_SUSPECT,
+                    .incarnation = incarnation,
+                    .timestamp_ms = now
+                };
+                update_queue_push(&engine->update_queue, &update);
+            }
             
             engine->pending_acks[i].active = 0;
         }
@@ -270,78 +288,112 @@ static void handle_ping_message(gossip_engine_t *engine,
                                const gossip_message_t *msg,
                                const char *src_ip, 
                                uint16_t src_port) {
-    LOG_DEBUG("Received PING from node %u (%s:%u)", 
-              msg->sender_id, src_ip, src_port);
+    LOG_DEBUG("Received PING from node %u (%s:%u, updates=%u)", 
+              msg->sender_id, src_ip, src_port, msg->num_updates);
     
-    // Process piggyback updates - CRITICAL: avoid lock upgrade deadlock
+    // Process ALL piggyback updates
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
-        cluster_member_t member = {
-            .node_id = upd->node_id,
-            .node_type = upd->node_type,
-            .gossip_port = upd->gossip_port,
-            .data_port = upd->data_port,
-            .status = upd->status,
-            .incarnation = upd->incarnation
-        };
-        
-        if (upd->node_id == msg->sender_id) {
-            safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
-        } else {
-            safe_strncpy(member.ip_address, upd->ip_address, MAX_IP_LEN);
-        }
-        
-        // Check if exists WITHOUT holding lock for next operation
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
-        int should_add = (existing == NULL);
-        int should_update = 0;
-        node_status_t old_status = NODE_STATUS_ALIVE;
         
-        if (existing) {
-            old_status = existing->status;
-            should_update = (upd->incarnation > existing->incarnation);
-            cluster_view_release(engine->cluster_view);  // MUST release before add/update!
-        }
-        
-        // Now perform operations without holding previous locks
-        if (should_add) {
-            cluster_view_add(engine->cluster_view, &member);
-            LOG_INFO("Discovered new member %u (%s:%u, type=%d)",
-                     upd->node_id, member.ip_address, member.gossip_port, upd->node_type);
+        if (!existing) {
+            // New member discovered
+            cluster_member_t new_member = {
+                .node_id = upd->node_id,
+                .node_type = upd->node_type,
+                .gossip_port = upd->gossip_port,
+                .data_port = upd->data_port,
+                .status = upd->status,
+                .incarnation = upd->incarnation,
+                .last_seen_ms = time_now_ms()
+            };
+            safe_strncpy(new_member.ip_address, upd->ip_address, MAX_IP_LEN);
+            
+            cluster_view_add(engine->cluster_view, &new_member);
+            
+            LOG_INFO("Discovered new member %u (%s:%u, type=%d) via PING",
+                     upd->node_id, upd->ip_address, upd->gossip_port, upd->node_type);
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
                                      upd->ip_address, upd->gossip_port, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
-        } else if (should_update) {
-            cluster_view_update_status(engine->cluster_view, upd->node_id,
-                                      upd->status, upd->incarnation);
             
-            LOG_INFO("Updated node %u status to %d (incarnation %lu)",
-                     upd->node_id, upd->status, upd->incarnation);
+            // Propagate discovery
+            gossip_member_update_t propagate = *upd;
+            propagate.timestamp_ms = time_now_ms();
+            update_queue_push(&engine->update_queue, &propagate);
+        } else {
+            // Existing member - check for update
+            node_status_t old_status = existing->status;
+            uint64_t old_incarnation = existing->incarnation;
             
-            if (upd->status != old_status && engine->event_callback) {
-                const char *event_type = NULL;
-                if (upd->status == NODE_STATUS_SUSPECT) {
-                    event_type = MEMBER_EVENT_FAILED;
-                } else if (upd->status == NODE_STATUS_DEAD) {
-                    event_type = MEMBER_EVENT_LEAVE;
-                } else if (upd->status == NODE_STATUS_ALIVE) {
-                    event_type = MEMBER_EVENT_UPDATE;
+            // CRITICAL: Handle DEAD -> ALIVE transition (rejoin)
+            if (old_status == NODE_STATUS_DEAD && upd->status == NODE_STATUS_ALIVE) {
+                // Node is rejoining - accept if incarnation is higher
+                if (upd->incarnation > old_incarnation) {
+                    cluster_view_release(engine->cluster_view);
+                    
+                    cluster_member_t rejoin_member = {
+                        .node_id = upd->node_id,
+                        .node_type = upd->node_type,
+                        .gossip_port = upd->gossip_port,
+                        .data_port = upd->data_port,
+                        .status = NODE_STATUS_ALIVE,
+                        .incarnation = upd->incarnation,
+                        .last_seen_ms = time_now_ms()
+                    };
+                    safe_strncpy(rejoin_member.ip_address, upd->ip_address, MAX_IP_LEN);
+                    
+                    cluster_view_add(engine->cluster_view, &rejoin_member);
+                    
+                    LOG_INFO("Node %u REJOINED (was DEAD, now ALIVE, inc=%lu)",
+                             upd->node_id, upd->incarnation);
+                    
+                    if (engine->event_callback) {
+                        engine->event_callback(upd->node_id, upd->node_type,
+                                             upd->ip_address, upd->gossip_port, upd->data_port,
+                                             MEMBER_EVENT_UPDATE, engine->event_callback_data);
+                    }
+                    continue;
                 }
+            }
+            
+            // Standard update logic
+            int should_update = (upd->incarnation > old_incarnation);
+            cluster_view_release(engine->cluster_view);
+            
+            if (should_update) {
+                cluster_view_update_status(engine->cluster_view, upd->node_id,
+                                          upd->status, upd->incarnation);
                 
-                if (event_type) {
-                    engine->event_callback(upd->node_id, upd->node_type,
-                                         upd->ip_address, upd->gossip_port, upd->data_port,
-                                         event_type, engine->event_callback_data);
+                LOG_DEBUG("Updated node %u from piggyback (status=%d, inc=%lu)",
+                          upd->node_id, upd->status, upd->incarnation);
+                
+                // Trigger callback if status changed
+                if (upd->status != old_status && engine->event_callback) {
+                    const char *event_type = NULL;
+                    if (upd->status == NODE_STATUS_SUSPECT) {
+                        event_type = MEMBER_EVENT_FAILED;
+                    } else if (upd->status == NODE_STATUS_DEAD) {
+                        event_type = MEMBER_EVENT_LEAVE;
+                    } else if (upd->status == NODE_STATUS_ALIVE) {
+                        event_type = MEMBER_EVENT_UPDATE;
+                    }
+                    
+                    if (event_type) {
+                        engine->event_callback(upd->node_id, upd->node_type,
+                                             upd->ip_address, upd->gossip_port, upd->data_port,
+                                             event_type, engine->event_callback_data);
+                    }
                 }
             }
         }
     }
     
-    // Send ACK
+    // Send ACK with our cluster state
     gossip_message_t ack_msg = {
         .version = 1,
         .msg_type = GOSSIP_MSG_ACK,
@@ -351,15 +403,44 @@ static void handle_ping_message(gossip_engine_t *engine,
         .num_updates = 0
     };
     
-    ack_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
-                                                  ack_msg.updates,
-                                                  GOSSIP_MAX_PIGGYBACK_UPDATES);
+    // Include cluster state in ACK (anti-entropy)
+    pthread_rwlock_rdlock(&engine->cluster_view->lock);
+    
+    size_t max_updates = ROOLE_MIN(engine->cluster_view->count, 
+                                   GOSSIP_MAX_PIGGYBACK_UPDATES);
+    
+    for (size_t i = 0; i < max_updates; i++) {
+        cluster_member_t *m = &engine->cluster_view->members[i];
+        
+        if (m->status == NODE_STATUS_DEAD || m->node_id == engine->my_id) {
+            continue;
+        }
+        
+        gossip_member_update_t *upd = &ack_msg.updates[ack_msg.num_updates];
+        upd->node_id = m->node_id;
+        upd->node_type = m->node_type;
+        safe_strncpy(upd->ip_address, m->ip_address, MAX_IP_LEN);
+        upd->gossip_port = m->gossip_port;
+        upd->data_port = m->data_port;
+        upd->status = m->status;
+        upd->incarnation = m->incarnation;
+        upd->timestamp_ms = time_now_ms();
+        
+        ack_msg.num_updates++;
+        
+        if (ack_msg.num_updates >= GOSSIP_MAX_PIGGYBACK_UPDATES) {
+            break;
+        }
+    }
+    
+    pthread_rwlock_unlock(&engine->cluster_view->lock);
     
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
     ssize_t msg_size = gossip_message_serialize(&ack_msg, buffer, sizeof(buffer));
     if (msg_size > 0) {
         gossip_send_udp(engine->udp_socket, buffer, msg_size, src_ip, src_port);
-        LOG_DEBUG("Sent ACK to node %u (%s:%u)", msg->sender_id, src_ip, src_port);
+        LOG_DEBUG("Sent ACK to node %u (%s:%u, updates=%u)", 
+                  msg->sender_id, src_ip, src_port, ack_msg.num_updates);
     }
 }
 
@@ -367,58 +448,65 @@ static void handle_ack_message(gossip_engine_t *engine,
                               const gossip_message_t *msg,
                               const char *src_ip,
                               uint16_t src_port) {
-    LOG_DEBUG("Received ACK from node %u (%s:%u)", 
-              msg->sender_id, src_ip, src_port);
+    LOG_DEBUG("Received ACK from node %u (%s:%u, updates=%u)", 
+              msg->sender_id, src_ip, src_port, msg->num_updates);
     
     remove_pending_ack(engine, msg->sender_id);
     
-    // Check if sender was suspect - AVOID lock upgrade deadlock
+    // Check if sender was suspect
     cluster_member_t *member = cluster_view_get(engine->cluster_view, msg->sender_id);
     int was_suspect = 0;
-    uint64_t incarnation = 0;
-    node_type_t node_type = NODE_TYPE_UNKNOWN;
-    char ip[MAX_IP_LEN] = {0};
-    uint16_t gossip_port = 0;
-    uint16_t data_port = 0;
     
     if (member) {
         was_suspect = (member->status == NODE_STATUS_SUSPECT);
-        incarnation = member->incarnation;
-        node_type = member->node_type;
-        safe_strncpy(ip, member->ip_address, MAX_IP_LEN);
-        gossip_port = member->gossip_port;
-        data_port = member->data_port;
-        cluster_view_release(engine->cluster_view);  // Release before update!
+        cluster_view_release(engine->cluster_view);
     }
     
     if (was_suspect) {
         LOG_INFO("Node %u recovered (was SUSPECT, now ALIVE)", msg->sender_id);
         cluster_view_update_status(engine->cluster_view, msg->sender_id,
-                                  NODE_STATUS_ALIVE, incarnation);
-        
-        if (engine->event_callback) {
-            engine->event_callback(msg->sender_id, node_type, ip, gossip_port, data_port,
-                                 MEMBER_EVENT_UPDATE, engine->event_callback_data);
-        }
+                                  NODE_STATUS_ALIVE, member->incarnation);
     }
     
-    // Process piggyback updates - same deadlock avoidance
+    // Process ALL piggyback updates from ACK (same as PING handler)
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
         
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
-        int should_update = 0;
         
-        if (existing) {
-            should_update = (upd->incarnation > existing->incarnation);
-            cluster_view_release(engine->cluster_view);  // Release!
-        }
-        
-        if (should_update) {
-            cluster_view_update_status(engine->cluster_view, upd->node_id,
-                                      upd->status, upd->incarnation);
-            LOG_DEBUG("Updated node %u from piggyback (status=%d)", 
-                      upd->node_id, upd->status);
+        if (!existing) {
+            // Discovered new member via ACK
+            cluster_member_t new_member = {
+                .node_id = upd->node_id,
+                .node_type = upd->node_type,
+                .gossip_port = upd->gossip_port,
+                .data_port = upd->data_port,
+                .status = upd->status,
+                .incarnation = upd->incarnation,
+                .last_seen_ms = time_now_ms()
+            };
+            safe_strncpy(new_member.ip_address, upd->ip_address, MAX_IP_LEN);
+            
+            cluster_view_add(engine->cluster_view, &new_member);
+            
+            LOG_INFO("Discovered new member %u (%s:%u, type=%d) via ACK",
+                     upd->node_id, upd->ip_address, upd->gossip_port, upd->node_type);
+            
+            if (engine->event_callback) {
+                engine->event_callback(upd->node_id, upd->node_type,
+                                     upd->ip_address, upd->gossip_port, upd->data_port,
+                                     MEMBER_EVENT_JOIN, engine->event_callback_data);
+            }
+        } else {
+            int should_update = (upd->incarnation > existing->incarnation);
+            cluster_view_release(engine->cluster_view);
+            
+            if (should_update) {
+                cluster_view_update_status(engine->cluster_view, upd->node_id,
+                                          upd->status, upd->incarnation);
+                LOG_DEBUG("Updated node %u from ACK piggyback (status=%d)", 
+                          upd->node_id, upd->status);
+            }
         }
     }
 }
@@ -611,7 +699,23 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         return;
     }
     
-    // Add worker to cluster view
+    // Check if this is a rejoining node (was previously DEAD)
+    cluster_member_t *existing = cluster_view_get(engine->cluster_view, msg->sender_id);
+    int is_rejoin = false;
+    uint64_t new_incarnation = 0;
+    
+    if (existing) {
+        is_rejoin = (existing->status == NODE_STATUS_DEAD);
+        new_incarnation = existing->incarnation + 1; // Bump incarnation on rejoin
+        cluster_view_release(engine->cluster_view);
+        
+        if (is_rejoin) {
+            LOG_INFO("Node %u is REJOINING (was DEAD, new incarnation=%lu)", 
+                     msg->sender_id, new_incarnation);
+        }
+    }
+    
+    // Add/Update worker in cluster view
     if (msg->num_updates > 0) {
         const gossip_member_update_t *upd = &msg->updates[0];
         
@@ -621,28 +725,35 @@ static void handle_worker_join_message(gossip_engine_t *engine,
             .gossip_port = upd->gossip_port,
             .data_port = upd->data_port,
             .status = NODE_STATUS_ALIVE,
-            .incarnation = upd->incarnation
+            .incarnation = is_rejoin ? new_incarnation : upd->incarnation
         };
         safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
         
+        // This will either add or update (handling rejoin case)
         cluster_view_add(engine->cluster_view, &member);
         
-        LOG_INFO("Worker %u joined cluster", upd->node_id);
+        LOG_INFO("Worker %u joined cluster (incarnation=%lu)", 
+                 upd->node_id, member.incarnation);
         
         // Trigger event callback
         if (engine->event_callback) {
+            const char *event = is_rejoin ? MEMBER_EVENT_UPDATE : MEMBER_EVENT_JOIN;
             engine->event_callback(upd->node_id, NODE_TYPE_WORKER,
                                  src_ip, upd->gossip_port, upd->data_port,
-                                 MEMBER_EVENT_JOIN, engine->event_callback_data);
+                                 event, engine->event_callback_data);
         }
         
-        // =================================================================
-        // FIX: ACTIVELY PROPAGATE join to existing cluster members
-        // =================================================================
-        
-        gossip_member_update_t join_update = *upd;
+        // Propagate join/rejoin to cluster with correct incarnation
+        gossip_member_update_t join_update = {
+            .node_id = upd->node_id,
+            .node_type = NODE_TYPE_WORKER,
+            .status = NODE_STATUS_ALIVE,
+            .incarnation = member.incarnation, // Use the correct (possibly bumped) incarnation
+            .gossip_port = upd->gossip_port,
+            .data_port = upd->data_port,
+            .timestamp_ms = time_now_ms()
+        };
         safe_strncpy(join_update.ip_address, src_ip, MAX_IP_LEN);
-        join_update.timestamp_ms = time_now_ms();
         
         // Queue for background gossip (5x for redundancy)
         for (int i = 0; i < 5; i++) {
@@ -672,21 +783,22 @@ static void handle_worker_join_message(gossip_engine_t *engine,
             };
             immediate_gossip.updates[0] = join_update;
             
-            // Send UDP gossip immediately (don't wait for next round)
+            // Send UDP gossip immediately
             uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
             ssize_t msg_size = gossip_message_serialize(&immediate_gossip, 
                                                         buffer, sizeof(buffer));
             if (msg_size > 0) {
                 gossip_send_udp(engine->udp_socket, buffer, msg_size,
                                peer->ip_address, peer->gossip_port);
-                LOG_INFO("Immediately gossiped Worker %u join to node %u", 
-                         upd->node_id, peer->node_id);
+                LOG_INFO("Immediately gossiped Worker %u %s to node %u", 
+                         upd->node_id, is_rejoin ? "rejoin" : "join", peer->node_id);
             }
         }
         
         pthread_rwlock_unlock(&engine->cluster_view->lock);
         
-        LOG_INFO("Join propagation initiated for Worker %u", upd->node_id);
+        LOG_INFO("%s propagation initiated for Worker %u", 
+                 is_rejoin ? "Rejoin" : "Join", upd->node_id);
     }
     
     // Build bootstrap response with list of active ROUTERS
@@ -944,7 +1056,6 @@ static node_id_t select_random_peer(gossip_engine_t *engine) {
     size_t random_index = rand() % peer_count;
     return peer_list[random_index];
 }
-
 static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
     cluster_member_t *target = cluster_view_get(engine->cluster_view, target_node);
     if (!target) {
@@ -967,9 +1078,45 @@ static int send_ping_to_node(gossip_engine_t *engine, node_id_t target_node) {
         .num_updates = 0
     };
     
+    // FIX: First, try to get updates from queue
     ping_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
                                                    ping_msg.updates,
                                                    engine->config.max_piggyback);
+    
+    // FIX: If no queued updates, include full cluster state (anti-entropy)
+    if (ping_msg.num_updates == 0) {
+        pthread_rwlock_rdlock(&engine->cluster_view->lock);
+        
+        size_t max_updates = ROOLE_MIN(engine->cluster_view->count, 
+                                       GOSSIP_MAX_PIGGYBACK_UPDATES);
+        
+        for (size_t i = 0; i < max_updates; i++) {
+            cluster_member_t *m = &engine->cluster_view->members[i];
+            
+            // Skip dead nodes and self
+            if (m->status == NODE_STATUS_DEAD || m->node_id == engine->my_id) {
+                continue;
+            }
+            
+            gossip_member_update_t *upd = &ping_msg.updates[ping_msg.num_updates];
+            upd->node_id = m->node_id;
+            upd->node_type = m->node_type;
+            safe_strncpy(upd->ip_address, m->ip_address, MAX_IP_LEN);
+            upd->gossip_port = m->gossip_port;
+            upd->data_port = m->data_port;
+            upd->status = m->status;
+            upd->incarnation = m->incarnation;
+            upd->timestamp_ms = time_now_ms();
+            
+            ping_msg.num_updates++;
+            
+            if (ping_msg.num_updates >= GOSSIP_MAX_PIGGYBACK_UPDATES) {
+                break;
+            }
+        }
+        
+        pthread_rwlock_unlock(&engine->cluster_view->lock);
+    }
     
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
     ssize_t msg_size = gossip_message_serialize(&ping_msg, buffer, sizeof(buffer));
@@ -1008,12 +1155,16 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
         
         uint64_t elapsed = now - member->last_seen_ms;
         
+        LOG_DEBUG("Node %u suspect timeout check: elapsed=%lums (threshold=%ums)",
+                  member->node_id, elapsed, engine->config.dead_timeout_ms);
+        
         if (elapsed > engine->config.dead_timeout_ms) {
             node_id_t node_id = member->node_id;
             node_type_t node_type = member->node_type;
             char ip[MAX_IP_LEN];
             uint16_t gossip_port = member->gossip_port;
             uint16_t data_port = member->data_port;
+            uint64_t incarnation = member->incarnation;
             safe_strncpy(ip, member->ip_address, MAX_IP_LEN);
             
             pthread_rwlock_unlock(&engine->cluster_view->lock);
@@ -1022,17 +1173,20 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
                      node_id, elapsed);
             
             cluster_view_update_status(engine->cluster_view, node_id,
-                                      NODE_STATUS_DEAD, member->incarnation);
+                                      NODE_STATUS_DEAD, incarnation);
             
             gossip_member_update_t dead_update = {
                 .node_id = node_id,
                 .node_type = node_type,
                 .status = NODE_STATUS_DEAD,
-                .incarnation = member->incarnation,
+                .incarnation = incarnation,
+                .gossip_port = gossip_port,
+                .data_port = data_port,
                 .timestamp_ms = now
             };
             safe_strncpy(dead_update.ip_address, ip, MAX_IP_LEN);
             
+            // Push to update queue for propagation
             update_queue_push(&engine->update_queue, &dead_update);
             
             if (engine->event_callback) {
@@ -1103,25 +1257,44 @@ static void gossip_to_random_peers(gossip_engine_t *engine) {
         // Build gossip message
         gossip_message_t gossip_msg = {
             .version = 1,
-            .msg_type = GOSSIP_MSG_SUSPECT,  // Generic gossip message type
+            .msg_type = GOSSIP_MSG_ALIVE,  // Generic gossip message type
             .flags = 0,
             .sender_id = engine->my_id,
             .sequence_num = __sync_fetch_and_add(&engine->sequence_num, 1),
             .num_updates = 0
         };
+        pthread_rwlock_rdlock(&engine->cluster_view->lock);
         
-        // Pop updates from queue to piggyback
-        gossip_msg.num_updates = update_queue_pop_batch(&engine->update_queue,
-                                                        gossip_msg.updates,
-                                                        engine->config.max_piggyback);
+        size_t max_updates = ROOLE_MIN(engine->cluster_view->count, 
+                                       engine->config.max_piggyback);
         
-        // FIX: Only gossip if we have real updates
-        // Don't create artificial keepalive updates - let PING/ACK handle liveness
-        if (gossip_msg.num_updates == 0) {
-            continue;  // Skip this peer if no state changes to propagate
+        for (size_t j = 0; j < max_updates; j++) {
+            cluster_member_t *m = &engine->cluster_view->members[j];
+            
+            if (m->status == NODE_STATUS_DEAD || m->node_id == engine->my_id) {
+                continue;
+            }
+            
+            gossip_member_update_t *upd = &gossip_msg.updates[gossip_msg.num_updates];
+            upd->node_id = m->node_id;
+            upd->node_type = m->node_type;
+            safe_strncpy(upd->ip_address, m->ip_address, MAX_IP_LEN);
+            upd->gossip_port = m->gossip_port;
+            upd->data_port = m->data_port;
+            upd->status = m->status;
+            upd->incarnation = m->incarnation;
+            upd->timestamp_ms = time_now_ms();
+            
+            gossip_msg.num_updates++;
+            
+            if (gossip_msg.num_updates >= engine->config.max_piggyback) {
+                break;
+            }
         }
         
-        // Serialize and send
+        pthread_rwlock_unlock(&engine->cluster_view->lock);
+        
+        // Send gossip even if num_updates is small (anti-entropy principle)
         uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
         ssize_t msg_size = gossip_message_serialize(&gossip_msg, buffer, sizeof(buffer));
         if (msg_size > 0) {
@@ -1169,8 +1342,10 @@ static void* gossip_protocol_thread(void *arg) {
             LOG_DEBUG("No peers available for PING");
         }
         
+        // Check for ACK timeouts (marks nodes as SUSPECT)
         check_ack_timeouts(engine);
         
+        // CRITICAL: Check for SUSPECT timeouts (marks nodes as DEAD)
         check_suspect_timeouts(engine);
         
         if (round % 3 == 0) {
@@ -1178,22 +1353,41 @@ static void* gossip_protocol_thread(void *arg) {
         }
         
         if (round % 10 == 0) {
+            // FIX: Use a single lock acquisition to avoid race conditions
             pthread_rwlock_rdlock(&engine->cluster_view->lock);
+            
             size_t alive_count = 0, suspect_count = 0, dead_count = 0;
             
             for (size_t i = 0; i < engine->cluster_view->count; i++) {
-                switch (engine->cluster_view->members[i].status) {
-                    case NODE_STATUS_ALIVE: alive_count++; break;
-                    case NODE_STATUS_SUSPECT: suspect_count++; break;
-                    case NODE_STATUS_DEAD: dead_count++; break;
-                    default: break;
+                cluster_member_t *m = &engine->cluster_view->members[i];
+                
+                switch (m->status) {
+                    case NODE_STATUS_ALIVE: 
+                        alive_count++; 
+                        break;
+                    case NODE_STATUS_SUSPECT: 
+                        suspect_count++; 
+                        break;
+                    case NODE_STATUS_DEAD: 
+                        dead_count++; 
+                        break;
+                    default: 
+                        break;
                 }
             }
+            
+            size_t total = engine->cluster_view->count;
             
             pthread_rwlock_unlock(&engine->cluster_view->lock);
             
             LOG_INFO("Cluster state: %zu members (%zu alive, %zu suspect, %zu dead)",
-                     engine->cluster_view->count, alive_count, suspect_count, dead_count);
+                     total, alive_count, suspect_count, dead_count);
+            
+            // Sanity check
+            if (alive_count + suspect_count + dead_count != total) {
+                LOG_ERROR("Cluster state inconsistency detected! Total=%zu but sum=%zu",
+                          total, alive_count + suspect_count + dead_count);
+            }
         }
         
         usleep(engine->config.protocol_period_ms * 1000);

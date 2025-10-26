@@ -87,10 +87,10 @@ typedef struct gossip_config {
 // Default configuration for medium clusters
 static inline gossip_config_t gossip_default_config(void) {
     gossip_config_t config = {
-        .protocol_period_ms = 1000,
-        .ack_timeout_ms = 500,
-        .suspect_timeout_ms = 5000,
-        .dead_timeout_ms = 15000,
+        .protocol_period_ms = 1000,      // SWIM round period
+        .ack_timeout_ms = 500,           // PING->ACK timeout (marks SUSPECT)
+        .suspect_timeout_ms = 5000,      // Not used (deprecated)
+        .dead_timeout_ms = 5000,         // SUSPECT->DEAD timeout (was 15000)
         .fanout = 3,
         .max_piggyback = 10
     };

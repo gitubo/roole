@@ -58,16 +58,40 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
     
     pthread_rwlock_wrlock(&view->lock);
     
+    // Check if node already exists
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == member->node_id) {
-            view->members[i] = *member;
-            view->members[i].last_seen_ms = time_now_ms();
+            // Node exists - update it if new incarnation or status change
+            // CRITICAL: Allow DEAD nodes to rejoin with ALIVE status
+            if (member->status == NODE_STATUS_ALIVE && 
+                view->members[i].status == NODE_STATUS_DEAD) {
+                // Rejoining node - update everything
+                view->members[i] = *member;
+                view->members[i].last_seen_ms = time_now_ms();
+                view->members[i].incarnation = member->incarnation + 1; // Bump incarnation
+                pthread_rwlock_unlock(&view->lock);
+                LOG_INFO("Node %u rejoined cluster (was DEAD, now ALIVE, incarnation=%lu)", 
+                         member->node_id, view->members[i].incarnation);
+                return RESULT_OK;
+            }
+            // For other updates, use the standard update mechanism
+            else if (member->incarnation >= view->members[i].incarnation) {
+                view->members[i] = *member;
+                view->members[i].last_seen_ms = time_now_ms();
+                pthread_rwlock_unlock(&view->lock);
+                LOG_DEBUG("Updated existing member %u (incarnation=%lu)", 
+                          member->node_id, member->incarnation);
+                return RESULT_OK;
+            }
+            // Reject stale updates
             pthread_rwlock_unlock(&view->lock);
-            LOG_DEBUG("Updated existing member %u", member->node_id);
+            LOG_DEBUG("Ignoring stale update for node %u (inc %lu <= %lu)", 
+                      member->node_id, member->incarnation, view->members[i].incarnation);
             return RESULT_OK;
         }
     }
     
+    // New node - add it
     if (view->count >= view->capacity) {
         pthread_rwlock_unlock(&view->lock);
         LOG_ERROR("Cluster view full (capacity: %zu)", view->capacity);
@@ -94,9 +118,21 @@ int cluster_view_update_status(cluster_view_t *view, node_id_t node_id,
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == node_id) {
             if (incarnation >= view->members[i].incarnation) {
+                node_status_t old_status = view->members[i].status;
+                
                 view->members[i].status = status;
                 view->members[i].incarnation = incarnation;
-                view->members[i].last_seen_ms = time_now_ms();
+                
+                // CRITICAL FIX: Only update last_seen_ms when transitioning to ALIVE
+                // Keep the original timestamp for SUSPECT/DEAD to allow timeout detection
+                if (status == NODE_STATUS_ALIVE) {
+                    view->members[i].last_seen_ms = time_now_ms();
+                } else if (status == NODE_STATUS_SUSPECT && old_status == NODE_STATUS_ALIVE) {
+                    // When first marking as SUSPECT, record the time
+                    view->members[i].last_seen_ms = time_now_ms();
+                }
+                // For SUSPECT->SUSPECT or SUSPECT->DEAD, preserve original last_seen_ms
+                
                 pthread_rwlock_unlock(&view->lock);
                 LOG_DEBUG("Updated node %u status to %d (incarnation %lu)", 
                           node_id, status, incarnation);
