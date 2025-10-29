@@ -179,7 +179,7 @@ typedef struct router_state {
 
 int router_init(router_state_t *router, node_id_t router_id,
                uint16_t gossip_port, uint16_t data_port, uint16_t ingress_port,
-               const char *bind_addr);
+               const char *bind_addr, const char *metrics_addr);
 int router_start(router_state_t *router);
 void router_shutdown(router_state_t *router);
 

@@ -75,7 +75,7 @@ size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
 
 // Callback for membership events
 typedef void (*member_event_cb)(node_id_t node_id, node_type_t type, 
-                                const char *ip, uint16_t gossip_port, uint16_t data_port,
+                                const char *ip, uint16_t data_port,
                                 const char *event_type, void *user_data);
 
 typedef struct membership_handle {

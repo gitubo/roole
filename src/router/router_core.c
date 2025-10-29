@@ -4,6 +4,7 @@
 
 #include "roole/router.h"
 #include "roole/common.h"
+#include "roole/config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +15,7 @@
 // ============================================================================
 
 static void on_member_event(node_id_t node_id, node_type_t type,
-                           const char *ip, uint16_t gossip_port, uint16_t data_port,
+                           const char *ip, uint16_t data_port,
                            const char *event_type, void *user_data) {
     router_state_t *router = (router_state_t*)user_data;
 
@@ -54,7 +55,7 @@ static void* router_cleanup_thread_fn(void *arg) {
 
 int router_init(router_state_t *router, node_id_t router_id,
                uint16_t gossip_port, uint16_t data_port, uint16_t ingress_port,
-               const char *bind_addr) {
+               const char *bind_addr, const char *metrics_addr) {
     if (!router) return RESULT_ERR_INVALID;
 
     memset(router, 0, sizeof(router_state_t));
@@ -106,6 +107,119 @@ int router_init(router_state_t *router, node_id_t router_id,
     
     // Get gossip engine handle for direct access
     router->gossip_engine = ((struct membership_handle*)router->membership)->gossip_engine;
+
+// ========================================================================
+    // METRICS INITIALIZATION
+    // ========================================================================
+    
+    if (metrics_addr && strlen(metrics_addr) > 0) {
+        char metrics_ip[16];
+        uint16_t metrics_port;
+        config_parse_address(metrics_addr, metrics_ip, &metrics_port);
+        
+        LOG_INFO("Metrics configuration: addr='%s', parsed ip='%s', port=%u", 
+                 metrics_addr, metrics_ip, metrics_port);
+        
+        if (metrics_port > 0) {
+            LOG_INFO("Initializing router metrics system...");
+            
+            router->metrics_registry = metrics_registry_init();
+            if (!router->metrics_registry) {
+                LOG_WARN("Failed to initialize metrics registry - continuing without metrics");
+            } else {
+                LOG_INFO("Metrics registry initialized successfully");
+                
+                // Create metric labels: node_id and node_type
+                char router_id_str[32];
+                snprintf(router_id_str, sizeof(router_id_str), "%u", router_id);
+                
+                metric_label_t labels[2];
+                safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[0].value, router_id_str, MAX_LABEL_VALUE_LEN);
+                safe_strncpy(labels[1].name, "node_type", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[1].value, "router", MAX_LABEL_VALUE_LEN);
+                
+                LOG_DEBUG("Creating router metrics with labels: node_id=%s, node_type=router", 
+                         router_id_str);
+                
+                // Create counter metrics
+                router->metric_messages_routed_total = metrics_get_or_create_counter(
+                    router->metrics_registry,
+                    "router_messages_routed_total",
+                    "Total number of messages successfully routed to workers",
+                    2, labels
+                );
+                
+                router->metric_messages_routed_failed = metrics_get_or_create_counter(
+                    router->metrics_registry,
+                    "router_messages_routed_failed",
+                    "Total number of messages that failed to route",
+                    2, labels
+                );
+                
+                // Create gauge metrics
+                router->metric_uptime_seconds = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "uptime_seconds",
+                    "Node uptime in seconds",
+                    2, labels
+                );
+                
+                // Cluster metrics
+                router->metric_cluster_members_total = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_total",
+                    "Total number of cluster members known to this node",
+                    2, labels
+                );
+                
+                router->metric_cluster_members_active = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_active",
+                    "Number of active cluster members",
+                    2, labels
+                );
+                
+                router->metric_cluster_members_suspect = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_suspect",
+                    "Number of suspected cluster members",
+                    2, labels
+                );
+                
+                router->metric_cluster_members_dead = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_dead",
+                    "Number of dead cluster members",
+                    2, labels
+                );
+                
+                LOG_INFO("Metrics created successfully, starting HTTP server...");
+                
+                // Start metrics HTTP server
+                router->metrics_server = metrics_server_start(
+                    router->metrics_registry,
+                    metrics_ip,
+                    metrics_port
+                );
+                
+                if (!router->metrics_server) {
+                    LOG_ERROR("Failed to start metrics HTTP server on %s:%u", 
+                            metrics_ip, metrics_port);
+                    LOG_WARN("Continuing without metrics endpoint");
+                } else {
+                    LOG_INFO("Metrics HTTP server started successfully on http://%s:%u/metrics", 
+                            metrics_ip, metrics_port);
+                }
+            }
+        } else {
+            LOG_WARN("Metrics disabled: invalid port=%u in config", metrics_port);
+        }
+    } else {
+        LOG_INFO("Metrics disabled: no metrics_addr configured");
+        router->metrics_registry = NULL;
+        router->metrics_server = NULL;
+    }
 
     LOG_INFO("Router %u initialized (GOSSIP:%u, DATA:%u, INGRESS:%u)",
              router_id, gossip_port, data_port, ingress_port);
@@ -330,4 +444,50 @@ int router_on_execution_update(router_state_t *router, execution_id_t exec_id, e
     } else if (status == EXEC_STATUS_FAILED) {
         LOG_ERROR("Execution %lu failed", exec_id);
     }return RESULT_OK;
+}
+
+
+void router_update_cluster_metrics(router_state_t *router) {
+    if (!router || !router->cluster_view.members) return;
+    
+    pthread_rwlock_rdlock(&router->cluster_view.lock);
+    
+    size_t total = router->cluster_view.count;
+    size_t active = 0;
+    size_t suspect = 0;
+    size_t dead = 0;
+    
+    for (size_t i = 0; i < total; i++) {
+        cluster_member_t *member = &router->cluster_view.members[i];
+        
+        switch (member->status) {
+            case NODE_STATUS_ALIVE:
+                active++;
+                break;
+            case NODE_STATUS_SUSPECT:
+                suspect++;
+                break;
+            case NODE_STATUS_DEAD:
+                dead++;
+                break;
+            default:
+                break;
+        }
+    }
+    
+    pthread_rwlock_unlock(&router->cluster_view.lock);
+    
+    // Update metrics
+    if (router->metric_cluster_members_total) {
+        metrics_gauge_set(router->metric_cluster_members_total, (double)total);
+    }
+    if (router->metric_cluster_members_active) {
+        metrics_gauge_set(router->metric_cluster_members_active, (double)active);
+    }
+    if (router->metric_cluster_members_suspect) {
+        metrics_gauge_set(router->metric_cluster_members_suspect, (double)suspect);
+    }
+    if (router->metric_cluster_members_dead) {
+        metrics_gauge_set(router->metric_cluster_members_dead, (double)dead);
+    }
 }

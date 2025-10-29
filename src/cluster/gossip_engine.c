@@ -317,7 +317,7 @@ static void handle_ping_message(gossip_engine_t *engine,
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->gossip_port, upd->data_port,
+                                     upd->ip_address, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
             
@@ -354,7 +354,7 @@ static void handle_ping_message(gossip_engine_t *engine,
                     
                     if (engine->event_callback) {
                         engine->event_callback(upd->node_id, upd->node_type,
-                                             upd->ip_address, upd->gossip_port, upd->data_port,
+                                             upd->ip_address, upd->data_port,
                                              MEMBER_EVENT_UPDATE, engine->event_callback_data);
                     }
                     continue;
@@ -385,7 +385,7 @@ static void handle_ping_message(gossip_engine_t *engine,
                     
                     if (event_type) {
                         engine->event_callback(upd->node_id, upd->node_type,
-                                             upd->ip_address, upd->gossip_port, upd->data_port,
+                                             upd->ip_address, upd->data_port,
                                              event_type, engine->event_callback_data);
                     }
                 }
@@ -494,7 +494,7 @@ static void handle_ack_message(gossip_engine_t *engine,
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->gossip_port, upd->data_port,
+                                     upd->ip_address, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
         } else {
@@ -636,7 +636,7 @@ static void handle_dead_message(gossip_engine_t *engine,
             LOG_INFO("Node %u marked as DEAD", upd->node_id);
             
             if (engine->event_callback) {
-                engine->event_callback(upd->node_id, node_type, ip, gossip_port, data_port,
+                engine->event_callback(upd->node_id, node_type, ip, data_port,
                                      MEMBER_EVENT_LEAVE, engine->event_callback_data);
             }
         }
@@ -671,7 +671,7 @@ static void handle_join_message(gossip_engine_t *engine,
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, upd->node_type,
-                                     upd->ip_address, upd->gossip_port, upd->data_port,
+                                     upd->ip_address, upd->data_port,
                                      MEMBER_EVENT_JOIN, engine->event_callback_data);
             }
             
@@ -739,7 +739,7 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         if (engine->event_callback) {
             const char *event = is_rejoin ? MEMBER_EVENT_UPDATE : MEMBER_EVENT_JOIN;
             engine->event_callback(upd->node_id, NODE_TYPE_WORKER,
-                                 src_ip, upd->gossip_port, upd->data_port,
+                                 src_ip, upd->data_port,
                                  event, engine->event_callback_data);
         }
         
@@ -1190,7 +1190,7 @@ static void check_suspect_timeouts(gossip_engine_t *engine) {
             update_queue_push(&engine->update_queue, &dead_update);
             
             if (engine->event_callback) {
-                engine->event_callback(node_id, node_type, ip, gossip_port, data_port,
+                engine->event_callback(node_id, node_type, ip, data_port,
                                      MEMBER_EVENT_LEAVE, 
                                      engine->event_callback_data);
             }
