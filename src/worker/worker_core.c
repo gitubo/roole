@@ -1,119 +1,223 @@
-// src/router/router_core.c
-// COMPLETE VERSION WITH METRICS SUPPORT
+// src/worker/worker_core.c
+// UPDATED: Integrated dependency-free metrics system
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "roole/router.h"
+#include "roole/worker.h"
 #include "roole/config.h"
 #include "roole/common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+#include <errno.h>
 
 // ============================================================================
-// ROUTER CALLBACKS
+// WORKER CALLBACKS
 // ============================================================================
 
 static void on_member_event(node_id_t node_id, node_type_t type,
                            const char *ip, uint16_t data_port,
                            const char *event_type, void *user_data) {
-    router_state_t *router = (router_state_t*)user_data;
+    worker_state_t *worker = (worker_state_t*)user_data;
 
-    if (type == NODE_TYPE_WORKER) {
+    if (type == NODE_TYPE_ROUTER) {
         if (strcmp(event_type, MEMBER_EVENT_JOIN) == 0) {
-            router_on_worker_join(router, node_id, ip, data_port);
+            worker_add_router(worker, node_id, ip, data_port);
         }
         else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 ||
                  strcmp(event_type, MEMBER_EVENT_LEAVE) == 0) {
-            router_on_worker_failed(router, node_id);
+            worker_remove_router(worker, node_id);
         }
     }
 }
 
 // ============================================================================
-// BACKGROUND THREADS
+// EXECUTOR THREAD
 // ============================================================================
 
-static void* router_cleanup_thread_fn(void *arg) {
-    router_state_t *router = (router_state_t*)arg;
+void* worker_executor_thread_fn(void *arg) {
+    worker_state_t *worker = (worker_state_t*)arg;
     
-    LOG_INFO("Router cleanup thread started");
+    LOG_INFO("Worker executor thread started");
     
-    while (!router->shutdown_flag) {
-        usleep(60 * 1000 * 1000);
+    while (!worker->shutdown_flag) {
+        message_t message;
         
-        execution_tracker_cleanup_completed(&router->exec_tracker);
+        int ret = message_queue_pop(&worker->message_queue, &message, 1000);
+        
+        if (ret == RESULT_ERR_TIMEOUT || ret == RESULT_ERR_EMPTY) {
+            // Update queue size metric
+            if (worker->metric_queue_size) {
+                size_t queue_size = message_queue_size(&worker->message_queue);
+                metrics_gauge_set(worker->metric_queue_size, (double)queue_size);
+            }
+            continue;
+        }
+        
+        if (ret != RESULT_OK) {
+            LOG_ERROR("Failed to pop message from queue");
+            continue;
+        }
+        
+        uint64_t now_ms = time_now_ms();
+        uint64_t wait_time_us = (now_ms - message.received_at_ms) * 1000;
+        
+        LOG_INFO("Processing message %lu (DAG %u, waited %lu us)", 
+                 message.exec_id, message.dag_id, wait_time_us);
+        
+        __sync_fetch_and_add(&worker->active_executions, 1);
+        
+        // Update active executions metric
+        if (worker->metric_active_executions) {
+            metrics_gauge_set(worker->metric_active_executions, 
+                            (double)worker->active_executions);
+        }
+        
+        struct timespec start_time;
+        timespec_now(&start_time);
+        
+        // Simulate processing (replace with actual DAG execution)
+        usleep(500000);  // 500ms
+        
+        struct timespec end_time;
+        timespec_now(&end_time);
+        double processing_time_us = time_diff_us(&start_time, &end_time);
+        
+        execution_status_t status = EXEC_STATUS_COMPLETED;
+        
+        // Send status update to router
+        pthread_mutex_lock(&worker->routers_lock);
+        router_connection_t *router_conn = NULL;
+        for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
+            if (worker->routers[i].active) {
+                router_conn = &worker->routers[i];
+                break;
+            }
+        }
+        
+        if (router_conn && router_conn->data_channel) {
+            uint8_t payload[9];
+            memcpy(payload, &message.exec_id, 8);
+            payload[8] = (uint8_t)status;
+            
+            size_t msg_len = rpc_pack_message(
+                router_conn->data_channel->tx_buffer,
+                worker->worker_id,
+                message.exec_id,
+                RPC_TYPE_REQUEST,
+                RPC_STATUS_UNKNOWN,
+                FUNC_ID_EXECUTION_UPDATE,
+                payload,
+                9
+            );
+            
+            send(router_conn->data_channel->socket_fd,
+                router_conn->data_channel->tx_buffer, msg_len, 0);
+            
+            LOG_INFO("Message %lu completed (%.2fms processing)", 
+                     message.exec_id, processing_time_us / 1000.0);
+            
+            // Update success metric
+            if (worker->metric_messages_processed) {
+                metrics_counter_inc(worker->metric_messages_processed);
+            }
+        } else {
+            LOG_ERROR("No router connection available for status update");
+            
+            // Update failure metric
+            if (worker->metric_messages_failed) {
+                metrics_counter_inc(worker->metric_messages_failed);
+            }
+        }
+        pthread_mutex_unlock(&worker->routers_lock);
+        
+        __sync_fetch_and_sub(&worker->active_executions, 1);
+        
+        // Update active executions metric
+        if (worker->metric_active_executions) {
+            metrics_gauge_set(worker->metric_active_executions, 
+                            (double)worker->active_executions);
+        }
     }
     
-    LOG_INFO("Router cleanup thread stopped");
+    LOG_INFO("Worker executor thread stopped");
     return NULL;
 }
 
 // ============================================================================
-// ROUTER INITIALIZATION
+// WORKER INITIALIZATION
 // ============================================================================
 
-int router_init(router_state_t *router, node_id_t router_id,
-               uint16_t gossip_port, uint16_t data_port, uint16_t ingress_port,
-               const char *bind_addr, const char *metrics_addr) {
-    if (!router) return RESULT_ERR_INVALID;
+int worker_init(worker_state_t *worker, node_id_t worker_id,
+               uint16_t gossip_port, uint16_t data_port,
+               const char *bind_addr, size_t num_executor_threads, 
+               const char *metrics_addr) {
+    if (!worker || num_executor_threads == 0 || num_executor_threads > 16) {
+        return RESULT_ERR_INVALID;
+    }
 
-    memset(router, 0, sizeof(router_state_t));
-    router->router_id = router_id;
-    router->gossip_port = gossip_port;
-    router->data_port = data_port;
-    router->ingress_port = ingress_port;
-    router->shutdown_flag = 0;
-    router->start_time_ms = time_now_ms();
+    memset(worker, 0, sizeof(worker_state_t));
+    worker->worker_id = worker_id;
+    worker->gossip_port = gossip_port;
+    worker->data_port = data_port;
+    worker->num_executor_threads = num_executor_threads;
+    worker->shutdown_flag = 0;
+    worker->active_executions = 0;
+    worker->catalog_version = 0;
+    worker->start_time_ms = time_now_ms();
     
-    safe_strncpy(router->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
+    safe_strncpy(worker->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
     
-    if (dag_catalog_init(&router->dag_catalog, MAX_DAGS) != RESULT_OK) {
+    // Initialize DAG catalog
+    if (dag_catalog_init(&worker->dag_catalog, MAX_DAGS) != RESULT_OK) {
         LOG_ERROR("Failed to initialize DAG catalog");
         return RESULT_ERR_INVALID;
     }
     
-    if (worker_pool_init(&router->worker_pool, MAX_WORKERS) != RESULT_OK) {
-        LOG_ERROR("Failed to initialize worker pool");
-        dag_catalog_destroy(&router->dag_catalog);
+    // Initialize message queue
+    if (message_queue_init(&worker->message_queue, MAX_WORKER_QUEUE_SIZE) != RESULT_OK) {
+        LOG_ERROR("Failed to initialize message queue");
+        dag_catalog_destroy(&worker->dag_catalog);
         return RESULT_ERR_INVALID;
     }
     
-    if (execution_tracker_init(&router->exec_tracker, MAX_PENDING_EXECUTIONS) != RESULT_OK) {
-        LOG_ERROR("Failed to initialize execution tracker");
-        worker_pool_destroy(&router->worker_pool);
-        dag_catalog_destroy(&router->dag_catalog);
-        return RESULT_ERR_INVALID;
-    }
-    
-    if (cluster_view_init(&router->cluster_view, MAX_CLUSTER_NODES) != RESULT_OK) {
+    // Initialize cluster view
+    if (cluster_view_init(&worker->cluster_view, MAX_CLUSTER_NODES) != RESULT_OK) {
         LOG_ERROR("Failed to initialize cluster view");
-        execution_tracker_destroy(&router->exec_tracker);
-        worker_pool_destroy(&router->worker_pool);
-        dag_catalog_destroy(&router->dag_catalog);
+        message_queue_destroy(&worker->message_queue);
+        dag_catalog_destroy(&worker->dag_catalog);
         return RESULT_ERR_INVALID;
     }
     
-    if (membership_init(&router->membership, router_id, NODE_TYPE_ROUTER,
-                       router->bind_addr, router->gossip_port, router->data_port) != RESULT_OK) {
+    // Initialize routers lock
+    if (pthread_mutex_init(&worker->routers_lock, NULL) != 0) {
+        LOG_ERROR("Failed to initialize routers lock");
+        cluster_view_destroy(&worker->cluster_view);
+        message_queue_destroy(&worker->message_queue);
+        dag_catalog_destroy(&worker->dag_catalog);
+        return RESULT_ERR_INVALID;
+    }
+    
+    // Initialize membership (gossip protocol)
+    if (membership_init(&worker->membership, worker_id, NODE_TYPE_WORKER,
+                       worker->bind_addr, worker->gossip_port, worker->data_port) != RESULT_OK) {
         LOG_ERROR("Failed to initialize membership");
-        cluster_view_destroy(&router->cluster_view);
-        execution_tracker_destroy(&router->exec_tracker);
-        worker_pool_destroy(&router->worker_pool);
-        dag_catalog_destroy(&router->dag_catalog);
+        pthread_mutex_destroy(&worker->routers_lock);
+        cluster_view_destroy(&worker->cluster_view);
+        message_queue_destroy(&worker->message_queue);
+        dag_catalog_destroy(&worker->dag_catalog);
         return RESULT_ERR_INVALID;
     }
 
-    membership_set_callback(router->membership, on_member_event, router);
-    
-    // Get gossip engine handle for direct access
-    router->gossip_engine = ((struct membership_handle*)router->membership)->gossip_engine;
+    membership_set_callback(worker->membership, on_member_event, worker);
+    worker->gossip_engine = ((struct membership_handle*)worker->membership)->gossip_engine;
 
-    // ========================================================================
-    // METRICS INITIALIZATION
-    // ========================================================================
-    
+    // Initialize metrics system if metrics_addr provided
     if (metrics_addr && strlen(metrics_addr) > 0) {
         char metrics_ip[16];
         uint16_t metrics_port;
@@ -123,89 +227,71 @@ int router_init(router_state_t *router, node_id_t router_id,
                  metrics_addr, metrics_ip, metrics_port);
         
         if (metrics_port > 0) {
-            LOG_INFO("Initializing router metrics system...");
+            LOG_INFO("Initializing metrics system...");
             
-            router->metrics_registry = metrics_registry_init();
-            if (!router->metrics_registry) {
+            worker->metrics_registry = metrics_registry_init();
+            if (!worker->metrics_registry) {
                 LOG_WARN("Failed to initialize metrics registry - continuing without metrics");
             } else {
                 LOG_INFO("Metrics registry initialized successfully");
                 
-                // Create metric labels: node_id and node_type
-                char router_id_str[32];
-                snprintf(router_id_str, sizeof(router_id_str), "%u", router_id);
+                // Create metric label for worker_id
+                char worker_id_str[32];
+                snprintf(worker_id_str, sizeof(worker_id_str), "%u", worker_id);
                 
-                metric_label_t labels[2];
-                safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[0].value, router_id_str, MAX_LABEL_VALUE_LEN);
-                safe_strncpy(labels[1].name, "node_type", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[1].value, "router", MAX_LABEL_VALUE_LEN);
+                metric_label_t labels[1];
+                safe_strncpy(labels[0].name, "worker_id", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[0].value, worker_id_str, MAX_LABEL_VALUE_LEN);
                 
-                LOG_DEBUG("Creating router metrics with labels: node_id=%s, node_type=router", 
-                         router_id_str);
+                LOG_DEBUG("Creating worker metrics with label worker_id=%s", worker_id_str);
                 
                 // Create counter metrics
-                router->metric_messages_routed_total = metrics_get_or_create_counter(
-                    router->metrics_registry,
-                    "router_messages_routed_total",
-                    "Total number of messages successfully routed to workers",
-                    2, labels
+                worker->metric_messages_processed = metrics_get_or_create_counter(
+                    worker->metrics_registry,
+                    "roole_worker_messages_processed_total",
+                    "Total number of messages successfully processed",
+                    1, labels
                 );
                 
-                router->metric_messages_routed_failed = metrics_get_or_create_counter(
-                    router->metrics_registry,
-                    "router_messages_routed_failed",
-                    "Total number of messages that failed to route",
-                    2, labels
+                worker->metric_messages_failed = metrics_get_or_create_counter(
+                    worker->metrics_registry,
+                    "roole_worker_messages_failed_total",
+                    "Total number of messages that failed processing",
+                    1, labels
                 );
                 
                 // Create gauge metrics
-                router->metric_uptime_seconds = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "uptime_seconds",
-                    "Node uptime in seconds",
-                    2, labels
+                worker->metric_queue_size = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "roole_worker_queue_size",
+                    "Current number of messages in worker queue",
+                    1, labels
                 );
                 
-                // Cluster metrics
-                router->metric_cluster_members_total = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_total",
-                    "Total number of cluster members known to this node",
-                    2, labels
+                worker->metric_active_executions = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "roole_worker_active_executions",
+                    "Current number of messages being processed",
+                    1, labels
                 );
                 
-                router->metric_cluster_members_active = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_active",
-                    "Number of active cluster members",
-                    2, labels
-                );
-                
-                router->metric_cluster_members_suspect = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_suspect",
-                    "Number of suspected cluster members",
-                    2, labels
-                );
-                
-                router->metric_cluster_members_dead = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_dead",
-                    "Number of dead cluster members",
-                    2, labels
+                worker->metric_uptime_seconds = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "roole_worker_uptime_seconds",
+                    "Worker uptime in seconds",
+                    1, labels
                 );
                 
                 LOG_INFO("Metrics created successfully, starting HTTP server...");
                 
                 // Start metrics HTTP server
-                router->metrics_server = metrics_server_start(
-                    router->metrics_registry,
+                worker->metrics_server = metrics_server_start(
+                    worker->metrics_registry,
                     metrics_ip,
                     metrics_port
                 );
                 
-                if (!router->metrics_server) {
+                if (!worker->metrics_server) {
                     LOG_ERROR("Failed to start metrics HTTP server on %s:%u", 
                             metrics_ip, metrics_port);
                     LOG_WARN("Continuing without metrics endpoint");
@@ -219,332 +305,363 @@ int router_init(router_state_t *router, node_id_t router_id,
         }
     } else {
         LOG_INFO("Metrics disabled: no metrics_addr configured");
-        router->metrics_registry = NULL;
-        router->metrics_server = NULL;
+        worker->metrics_registry = NULL;
+        worker->metrics_server = NULL;
     }
 
-    LOG_INFO("Router %u initialized (GOSSIP:%u, DATA:%u, INGRESS:%u)",
-             router_id, gossip_port, data_port, ingress_port);
+    LOG_INFO("Worker %u initialized (GOSSIP:%u, DATA:%u, %zu executor threads)",
+             worker_id, gossip_port, data_port, num_executor_threads);
     return RESULT_OK;
 }
 
-int router_start(router_state_t *router) {
-    if (!router) return RESULT_ERR_INVALID;
+int worker_start(worker_state_t *worker) {
+    if (!worker) return RESULT_ERR_INVALID;
     
-    if (pthread_create(&router->cleanup_thread, NULL, 
-                      router_cleanup_thread_fn, router) != 0) {
-        LOG_ERROR("Failed to start cleanup thread");
-        return RESULT_ERR_INVALID;
-    }
-    
-    LOG_INFO("Router %u started", router->router_id);
-    return RESULT_OK;
-}
-
-void router_shutdown(router_state_t *router) {
-    if (!router) return;
-    
-    LOG_INFO("Shutting down router %u", router->router_id);
-    
-    router->shutdown_flag = 1;
-    
-    pthread_join(router->cleanup_thread, NULL);
-    
-    // Shutdown metrics
-    if (router->metrics_server) {
-        metrics_server_shutdown(router->metrics_server);
-        router->metrics_server = NULL;
-    }
-    
-    if (router->metrics_registry) {
-        metrics_registry_destroy(router->metrics_registry);
-        router->metrics_registry = NULL;
-    }
-    
-    if (router->membership) {
-        membership_shutdown(router->membership);
-    }
-    
-    cluster_view_destroy(&router->cluster_view);
-    execution_tracker_destroy(&router->exec_tracker);
-    worker_pool_destroy(&router->worker_pool);
-    dag_catalog_destroy(&router->dag_catalog);
-    
-    LOG_INFO("Router %u shutdown complete", router->router_id);
-}
-
-// ============================================================================
-// DAG MANAGEMENT
-// ============================================================================
-
-int router_add_dag(router_state_t *router, const dag_t *dag) {
-    if (!router || !dag) return RESULT_ERR_INVALID;
-    
-    if (dag_validate(dag) != RESULT_OK) {
-        LOG_ERROR("DAG validation failed");
-        return RESULT_ERR_INVALID;
-    }
-    
-    int result = dag_catalog_add(&router->dag_catalog, dag);
-    
-    if (result == RESULT_OK) {
-        LOG_INFO("Router %u: Added DAG %u '%s'", 
-                 router->router_id, dag->dag_id, dag->name);
-    }
-    
-    return result;
-}
-
-int router_update_dag(router_state_t *router, const dag_t *dag) {
-    if (!router || !dag) return RESULT_ERR_INVALID;
-    
-    if (dag_validate(dag) != RESULT_OK) {
-        LOG_ERROR("DAG validation failed");
-        return RESULT_ERR_INVALID;
-    }
-    
-    int result = dag_catalog_update(&router->dag_catalog, dag);
-    
-    if (result == RESULT_OK) {
-        LOG_INFO("Router %u: Updated DAG %u", router->router_id, dag->dag_id);
-    }
-    
-    return result;
-}
-
-int router_remove_dag(router_state_t *router, rule_id_t dag_id) {
-    if (!router) return RESULT_ERR_INVALID;
-    
-    int result = dag_catalog_remove(&router->dag_catalog, dag_id);
-    
-    if (result == RESULT_OK) {
-        LOG_INFO("Router %u: Removed DAG %u", router->router_id, dag_id);
-    }
-    
-    return result;
-}
-
-dag_t* router_get_dag(router_state_t *router, rule_id_t dag_id) {
-    if (!router) return NULL;
-    
-    return dag_catalog_get(&router->dag_catalog, dag_id);
-}
-
-// ============================================================================
-// MESSAGE SUBMISSION
-// ============================================================================
-
-int router_submit_message(router_state_t *router, rule_id_t dag_id,
-                         const uint8_t *message, size_t message_len,
-                         execution_id_t *out_exec_id) {
-    if (!router || !message || message_len == 0) return RESULT_ERR_INVALID;
-    
-    dag_t *dag = dag_catalog_get(&router->dag_catalog, dag_id);
-    if (!dag) {
-        LOG_ERROR("DAG %u not found", dag_id);
-        
-        // Update failure metric
-        if (router->metric_messages_routed_failed) {
-            metrics_counter_inc(router->metric_messages_routed_failed);
-        }
-        
-        return RESULT_ERR_NOTFOUND;
-    }
-    dag_catalog_release(&router->dag_catalog);
-    
-    node_id_t worker_id = router_select_worker(router, LOAD_BALANCE_LEAST_LOADED);
-    if (worker_id == 0) {
-        LOG_ERROR("No available workers");
-        
-        // Update failure metric
-        if (router->metric_messages_routed_failed) {
-            metrics_counter_inc(router->metric_messages_routed_failed);
-        }
-        
-        return RESULT_ERR_NOTFOUND;
-    }
-    
-    execution_id_t exec_id = execution_tracker_add(&router->exec_tracker, 
-                                                   dag_id, worker_id, 
-                                                   message, message_len, 3);
-    if (exec_id == 0) {
-        LOG_ERROR("Failed to create execution record");
-        
-        // Update failure metric
-        if (router->metric_messages_routed_failed) {
-            metrics_counter_inc(router->metric_messages_routed_failed);
-        }
-        
-        return RESULT_ERR_INVALID;
-    }
-    
-    LOG_INFO("Submitted execution %lu (DAG %u) to worker %u", 
-             exec_id, dag_id, worker_id);
-    
-    execution_tracker_update_status(&router->exec_tracker, exec_id, EXEC_STATUS_RUNNING);
-    
-    // Update success metric
-    if (router->metric_messages_routed_total) {
-        metrics_counter_inc(router->metric_messages_routed_total);
-    }
-    
-    if (out_exec_id) {
-        *out_exec_id = exec_id;
-    }
-    
-    return RESULT_OK;
-}
-
-int router_get_execution_status(router_state_t *router, execution_id_t exec_id,
-                               execution_status_t *out_status) {
-    if (!router || exec_id == 0 || !out_status) return RESULT_ERR_INVALID;
-    
-    execution_record_t *rec = execution_tracker_get(&router->exec_tracker, exec_id);
-    if (!rec) {
-        return RESULT_ERR_NOTFOUND;
-    }
-    
-    *out_status = rec->status;
-    execution_tracker_release(&router->exec_tracker);
-    
-    return RESULT_OK;
-}
-
-// ============================================================================
-// WORKER MANAGEMENT
-// ============================================================================
-
-int router_on_worker_join(router_state_t *router, node_id_t worker_id,
-                         const char *ip, uint16_t data_port) {
-    if (!router || !ip) return RESULT_ERR_INVALID;
-
-    LOG_INFO("Worker %u joined (%s DATA:%u)", worker_id, ip, data_port);
-
-    int result = worker_pool_add(&router->worker_pool, worker_id, ip, data_port);
-    if (result != RESULT_OK && result != RESULT_ERR_EXISTS) {
-        return result;
-    }
-
-    // Establish DATA channel connection
-    worker_info_t *worker = worker_pool_get(&router->worker_pool, worker_id);
-    if (worker) {
-        if (!worker->data_channel) {
-            worker->data_channel = safe_malloc(sizeof(rpc_channel_t));
-            if (worker->data_channel) {
-                if (rpc_client_connect(worker->data_channel, ip, data_port,
-                                    RPC_CHANNEL_DATA, 4096) == 0) {
-                    LOG_INFO("DATA channel established to worker %u", worker_id);
-                } else {
-                    LOG_ERROR("Failed to connect DATA channel to worker %u on port %u", 
-                             worker_id, data_port);
-                    safe_free(worker->data_channel);
-                    worker->data_channel = NULL;
-                }
-            } else {
-                LOG_ERROR("Failed to allocate DATA channel for worker %u", worker_id);
+    // Start executor threads
+    for (size_t i = 0; i < worker->num_executor_threads; i++) {
+        if (pthread_create(&worker->executor_threads[i], NULL, 
+                          worker_executor_thread_fn, worker) != 0) {
+            LOG_ERROR("Failed to start executor thread %zu", i);
+            
+            // Stop already started threads
+            worker->shutdown_flag = 1;
+            for (size_t j = 0; j < i; j++) {
+                pthread_join(worker->executor_threads[j], NULL);
             }
-        }
-        worker_pool_release(&router->worker_pool);
-    }
-    
-    return RESULT_OK;
-}
-
-int router_on_worker_failed(router_state_t *router, node_id_t worker_id) {
-    if (!router) return RESULT_ERR_INVALID;
-    
-    LOG_ERROR("Worker %u failed - initiating recovery", worker_id);
-    
-    worker_pool_update_status(&router->worker_pool, worker_id, NODE_STATUS_DEAD);
-    
-    execution_id_t pending_execs[MAX_PENDING_EXECUTIONS];
-    size_t count = execution_tracker_get_by_worker(&router->exec_tracker, 
-                                                   worker_id, pending_execs, 
-                                                   MAX_PENDING_EXECUTIONS);
-    
-    LOG_INFO("Found %zu pending executions on failed worker %u", count, worker_id);
-    
-    for (size_t i = 0; i < count; i++) {
-        execution_record_t *rec = execution_tracker_get(&router->exec_tracker, 
-                                                        pending_execs[i]);
-        if (rec) {
-            LOG_INFO("Re-scheduling execution %lu", rec->exec_id);
-            
-            execution_id_t new_exec_id;
-            router_submit_message(router, rec->dag_id, 
-                                rec->message_data, rec->message_len, 
-                                &new_exec_id);
-            
-            execution_tracker_update_status(&router->exec_tracker, 
-                                          rec->exec_id, EXEC_STATUS_FAILED);
-            
-            execution_tracker_release(&router->exec_tracker);
+            return RESULT_ERR_INVALID;
         }
     }
     
+    LOG_INFO("Worker %u started (%zu executor threads)", 
+             worker->worker_id, worker->num_executor_threads);
     return RESULT_OK;
 }
 
-int router_on_execution_update(router_state_t *router, execution_id_t exec_id, 
-                               execution_status_t status) {
-    if (!router || exec_id == 0) return RESULT_ERR_INVALID;
+void worker_shutdown(worker_state_t *worker) {
+    if (!worker) return;
     
-    execution_tracker_update_status(&router->exec_tracker, exec_id, status);
+    LOG_INFO("Shutting down worker %u", worker->worker_id);
     
-    if (status == EXEC_STATUS_COMPLETED) {
-        LOG_INFO("Execution %lu completed successfully", exec_id);
-    } else if (status == EXEC_STATUS_FAILED) {
-        LOG_ERROR("Execution %lu failed", exec_id);
+    worker->shutdown_flag = 1;
+    
+    // Wait for executor threads to complete
+    for (size_t i = 0; i < worker->num_executor_threads; i++) {
+        pthread_join(worker->executor_threads[i], NULL);
     }
     
-    return RESULT_OK;
+    // Shutdown membership (gossip protocol)
+    if (worker->membership) {
+        membership_shutdown(worker->membership);
+    }
+    
+    // Shutdown metrics system
+    if (worker->metrics_server) {
+        metrics_server_shutdown(worker->metrics_server);
+        worker->metrics_server = NULL;
+    }
+    
+    if (worker->metrics_registry) {
+        metrics_registry_destroy(worker->metrics_registry);
+        worker->metrics_registry = NULL;
+    }
+    
+    // Cleanup resources
+    pthread_mutex_destroy(&worker->routers_lock);
+    cluster_view_destroy(&worker->cluster_view);
+    message_queue_destroy(&worker->message_queue);
+    dag_catalog_destroy(&worker->dag_catalog);
+
+    LOG_INFO("Worker %u shutdown complete", worker->worker_id);
+}
+
+int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
+                          rule_id_t dag_id, node_id_t sender_id,
+                          const uint8_t *message_data, size_t message_len) {
+    if (!worker || !message_data || message_len == 0 || message_len > MAX_MESSAGE_SIZE) {
+        return RESULT_ERR_INVALID;
+    }
+    
+    message_t message;
+    memset(&message, 0, sizeof(message));
+    
+    message.exec_id = exec_id;
+    message.dag_id = dag_id;
+    message.sender_id = sender_id;
+    message.received_at_ms = time_now_ms();
+    
+    memcpy(message.message_data, message_data, message_len);
+    message.message_len = message_len;
+    
+    return message_queue_push(&worker->message_queue, &message);
 }
 
 // ============================================================================
-// METRICS HELPERS
+// WORKER BOOTSTRAP FROM CONFIG
 // ============================================================================
 
-void router_update_cluster_metrics(router_state_t *router) {
-    if (!router || !router->cluster_view.members) return;
+int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *config) {
+    if (!worker || !config || config->router_count == 0) {
+        LOG_ERROR("Invalid bootstrap configuration");
+        return RESULT_ERR_INVALID;
+    }
     
-    pthread_rwlock_rdlock(&router->cluster_view.lock);
+    // Select random seed router
+    size_t router_idx = rand() % config->router_count;
+    const char *router_addr = config->routers[router_idx];
     
-    size_t total = router->cluster_view.count;
-    size_t active = 0;
-    size_t suspect = 0;
-    size_t dead = 0;
+    char router_ip[16];
+    uint16_t router_gossip_port;
+    config_parse_address(router_addr, router_ip, &router_gossip_port);
     
-    for (size_t i = 0; i < total; i++) {
-        cluster_member_t *member = &router->cluster_view.members[i];
+    LOG_INFO("Bootstrapping from router %s:%u", router_ip, router_gossip_port);
+    
+    // Build WORKER_JOIN message
+    gossip_message_t join_msg = {
+        .version = 1,
+        .msg_type = GOSSIP_MSG_WORKER_JOIN,
+        .sender_id = worker->worker_id,
+        .sequence_num = 1,
+        .num_updates = 1
+    };
+    
+    join_msg.updates[0].node_id = worker->worker_id;
+    join_msg.updates[0].node_type = NODE_TYPE_WORKER;
+    join_msg.updates[0].status = NODE_STATUS_ALIVE;
+    join_msg.updates[0].incarnation = 0;
+    safe_strncpy(join_msg.updates[0].ip_address, worker->bind_addr, MAX_IP_LEN);
+    join_msg.updates[0].gossip_port = worker->gossip_port;
+    join_msg.updates[0].data_port = worker->data_port;
+    
+    // Create UDP socket for bootstrap
+    int bootstrap_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (bootstrap_sock < 0) {
+        LOG_ERROR("Cannot create bootstrap socket: %s", strerror(errno));
+        return RESULT_ERR_NETWORK;
+    }
+    
+    // Serialize message
+    uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
+    ssize_t msg_size = gossip_message_serialize(&join_msg, buffer, sizeof(buffer));
+    
+    if (msg_size < 0) {
+        LOG_ERROR("Failed to serialize WORKER_JOIN message");
+        close(bootstrap_sock);
+        return RESULT_ERR_INVALID;
+    }
+    
+    LOG_DEBUG("WORKER_JOIN serialized: %zd bytes (num_updates=%u)", 
+             msg_size, join_msg.num_updates);
+
+    // Send to seed router
+    struct sockaddr_in router_addr_in;
+    memset(&router_addr_in, 0, sizeof(router_addr_in));
+    router_addr_in.sin_family = AF_INET;
+    router_addr_in.sin_port = htons(router_gossip_port);
+    
+    if (inet_pton(AF_INET, router_ip, &router_addr_in.sin_addr) <= 0) {
+        LOG_ERROR("Invalid router IP address: %s", router_ip);
+        close(bootstrap_sock);
+        return RESULT_ERR_INVALID;
+    }
+    
+    if (sendto(bootstrap_sock, buffer, msg_size, 0,
+              (struct sockaddr*)&router_addr_in, sizeof(router_addr_in)) < 0) {
+        LOG_ERROR("Failed to send WORKER_JOIN: %s", strerror(errno));
+        close(bootstrap_sock);
+        return RESULT_ERR_NETWORK;
+    }
+    
+    LOG_INFO("WORKER_JOIN sent to %s:%u, waiting for response...", 
+             router_ip, router_gossip_port);
+    
+    // Set receive timeout (5 seconds)
+    struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+    if (setsockopt(bootstrap_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        LOG_WARN("Failed to set socket timeout: %s", strerror(errno));
+    }
+    
+    // Wait for JOIN_RESPONSE
+    uint8_t recv_buffer[GOSSIP_MAX_PAYLOAD_SIZE];
+    ssize_t received = recvfrom(bootstrap_sock, recv_buffer, sizeof(recv_buffer), 
+                               0, NULL, NULL);
+    
+    close(bootstrap_sock);
+    
+    if (received < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            LOG_ERROR("Timeout waiting for JOIN_RESPONSE (5 seconds)");
+            return RESULT_ERR_TIMEOUT;
+        }
+        LOG_ERROR("Failed to receive JOIN_RESPONSE: %s", strerror(errno));
+        return RESULT_ERR_NETWORK;
+    }
+    
+    LOG_DEBUG("Received response: %zd bytes", received);
+    
+    // Deserialize response
+    gossip_message_t response;
+    if (gossip_message_deserialize(recv_buffer, received, &response) != 0) {
+        LOG_ERROR("Invalid JOIN_RESPONSE (deserialization failed)");
+        return RESULT_ERR_INVALID;
+    }
+    
+    if (response.msg_type != GOSSIP_MSG_JOIN_RESPONSE) {
+        LOG_ERROR("Unexpected message type: %u (expected %u)", 
+                  response.msg_type, GOSSIP_MSG_JOIN_RESPONSE);
+        return RESULT_ERR_INVALID;
+    }
+    
+    LOG_INFO("Received JOIN_RESPONSE from router %u", response.sender_id);
+    
+    // Parse bootstrap data (list of routers)
+    gossip_bootstrap_response_t bootstrap_data;
+    size_t header_size = 16 + response.num_updates * 44;
+    
+    if ((size_t)received < header_size) {
+        LOG_ERROR("JOIN_RESPONSE too short: %zd bytes (expected at least %zu)", 
+                  received, header_size);
+        return RESULT_ERR_INVALID;
+    }
+    
+    if (gossip_deserialize_bootstrap_response(recv_buffer + header_size,
+                                              received - header_size,
+                                              &bootstrap_data) != 0) {
+        LOG_ERROR("Failed to deserialize bootstrap data");
+        return RESULT_ERR_INVALID;
+    }
+    
+    LOG_INFO("Received %u router addresses in bootstrap response", 
+             bootstrap_data.num_routers);
+    
+    // Connect to all routers in bootstrap response
+    for (uint8_t i = 0; i < bootstrap_data.num_routers; i++) {
+        char router_data_ip[16];
+        uint16_t router_data_port;
         
-        switch (member->status) {
-            case NODE_STATUS_ALIVE:
-                active++;
-                break;
-            case NODE_STATUS_SUSPECT:
-                suspect++;
-                break;
-            case NODE_STATUS_DEAD:
-                dead++;
-                break;
-            default:
-                break;
+        config_parse_address(bootstrap_data.routers[i].data_addr, 
+                           router_data_ip, &router_data_port);
+        
+        LOG_INFO("Connecting to router %u at %s (DATA port %u)", 
+                 bootstrap_data.routers[i].node_id,
+                 bootstrap_data.routers[i].data_addr,
+                 router_data_port);
+        
+        int result = worker_add_router(worker, 
+                                      bootstrap_data.routers[i].node_id,
+                                      router_data_ip, 
+                                      router_data_port);
+        
+        if (result == RESULT_OK) {
+            LOG_INFO("Successfully connected to router %u", 
+                     bootstrap_data.routers[i].node_id);
+        } else {
+            LOG_WARN("Failed to connect to router %u (error: %d)", 
+                     bootstrap_data.routers[i].node_id, result);
         }
     }
     
-    pthread_rwlock_unlock(&router->cluster_view.lock);
-    
-    // Update metrics
-    if (router->metric_cluster_members_total) {
-        metrics_gauge_set(router->metric_cluster_members_total, (double)total);
+    LOG_INFO("Worker bootstrap completed successfully");
+    return RESULT_OK;
+}
+
+// ============================================================================
+// ROUTER MANAGEMENT
+// ============================================================================
+
+int worker_add_router(worker_state_t *worker, node_id_t router_id,
+                     const char *ip, uint16_t data_port) {
+    if (!worker || !ip) return RESULT_ERR_INVALID;
+
+    pthread_mutex_lock(&worker->routers_lock);
+
+    // Check if router already exists
+    for (size_t i = 0; i < worker->router_count; i++) {
+        if (worker->routers[i].active && worker->routers[i].router_id == router_id) {
+            pthread_mutex_unlock(&worker->routers_lock);
+            LOG_DEBUG("Router %u already connected", router_id);
+            return RESULT_OK;
+        }
     }
-    if (router->metric_cluster_members_active) {
-        metrics_gauge_set(router->metric_cluster_members_active, (double)active);
+
+    // Find free slot
+    size_t slot = SIZE_MAX;
+    for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
+        if (!worker->routers[i].active) {
+            slot = i;
+            break;
+        }
     }
-    if (router->metric_cluster_members_suspect) {
-        metrics_gauge_set(router->metric_cluster_members_suspect, (double)suspect);
+
+    if (slot == SIZE_MAX) {
+        pthread_mutex_unlock(&worker->routers_lock);
+        LOG_ERROR("Maximum router connections reached (%d)", MAX_ROUTER_CONNECTIONS);
+        return RESULT_ERR_FULL;
     }
-    if (router->metric_cluster_members_dead) {
-        metrics_gauge_set(router->metric_cluster_members_dead, (double)dead);
+
+    // Initialize router connection
+    router_connection_t *conn = &worker->routers[slot];
+    memset(conn, 0, sizeof(router_connection_t));
+
+    conn->router_id = router_id;
+    safe_strncpy(conn->ip, ip, MAX_IP_LEN);
+    conn->data_port = data_port;
+    conn->last_sync_ms = time_now_ms();
+    conn->active = 1;
+
+    // Allocate DATA channel
+    conn->data_channel = safe_malloc(sizeof(rpc_channel_t));
+    if (!conn->data_channel) {
+        LOG_ERROR("Failed to allocate RPC data channel");
+        conn->active = 0;
+        pthread_mutex_unlock(&worker->routers_lock);
+        return RESULT_ERR_NOMEM;
     }
+
+    // Connect DATA channel
+    if (rpc_client_connect(conn->data_channel, ip, data_port,
+                          RPC_CHANNEL_DATA, 4096) != 0) {
+        LOG_ERROR("Failed to connect DATA channel to router %u at %s:%u", 
+                  router_id, ip, data_port);
+        safe_free(conn->data_channel);
+        conn->data_channel = NULL;
+        conn->active = 0;
+        pthread_mutex_unlock(&worker->routers_lock);
+        return RESULT_ERR_NETWORK;
+    }
+
+    // Update router count
+    if (slot >= worker->router_count) {
+        worker->router_count = slot + 1;
+    }
+
+    pthread_mutex_unlock(&worker->routers_lock);
+
+    LOG_INFO("Connected to router %u (%s DATA:%u)", router_id, ip, data_port);
+    return RESULT_OK;
+}
+
+int worker_remove_router(worker_state_t *worker, node_id_t router_id) {
+    if (!worker) return RESULT_ERR_INVALID;
+
+    pthread_mutex_lock(&worker->routers_lock);
+
+    for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
+        if (worker->routers[i].active && worker->routers[i].router_id == router_id) {
+            // Close and free DATA channel
+            if (worker->routers[i].data_channel) {
+                rpc_channel_destroy(worker->routers[i].data_channel);
+                safe_free(worker->routers[i].data_channel);
+            }
+
+            worker->routers[i].active = 0;
+
+            pthread_mutex_unlock(&worker->routers_lock);
+            LOG_INFO("Disconnected from router %u", router_id);
+            return RESULT_OK;
+        }
+    }
+
+    pthread_mutex_unlock(&worker->routers_lock);
+    LOG_WARN("Router %u not found (cannot remove)", router_id);
+    return RESULT_ERR_NOTFOUND;
 }

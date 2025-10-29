@@ -108,7 +108,7 @@ int router_init(router_state_t *router, node_id_t router_id,
     // Get gossip engine handle for direct access
     router->gossip_engine = ((struct membership_handle*)router->membership)->gossip_engine;
 
-// ========================================================================
+    // ========================================================================
     // METRICS INITIALIZATION
     // ========================================================================
     

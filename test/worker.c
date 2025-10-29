@@ -6,10 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 #include <time.h>
-#include <string.h>
-
 #include "roole/worker.h"
 #include "roole/config.h"
 #include "roole/common.h"
