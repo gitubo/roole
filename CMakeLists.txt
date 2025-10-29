@@ -6,30 +6,17 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -pthread -D_POSIX_C_SOURCE=200
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
 
-# Try to find prometheus-client-c (if installed via package manager)
-find_library(PROM_LIB prom PATHS /usr/local/lib /usr/lib)
-find_library(PROMHTTP_LIB promhttp PATHS /usr/local/lib /usr/lib)
-find_path(PROM_INCLUDE prom.h PATHS /usr/local/include /usr/include)
-
-# If not found, use bundled version (download or vendor it)
-if(NOT PROM_LIB OR NOT PROMHTTP_LIB)
-    message(STATUS "Prometheus client not found, metrics will be disabled")
-    set(ENABLE_METRICS OFF)
-else()
-    message(STATUS "Found Prometheus client: ${PROM_LIB}")
-    set(ENABLE_METRICS ON)
-    include_directories(${PROM_INCLUDE})
-endif()
-
 include_directories(include)
 
 # ============================================================================
-# CORE LIBRARY (RPC + Common utilities)
+# CORE LIBRARY (RPC + Common utilities + Metrics)
 # ============================================================================
 add_library(roole_core STATIC
     src/core/rpc.c
     src/core/common.c
     src/core/config.c
+    src/core/metrics.c
+    src/core/metrics_server.c
 )
 target_link_libraries(roole_core pthread m)
 
@@ -66,23 +53,15 @@ add_library(roole_router STATIC
 target_link_libraries(roole_router roole_core roole_dag roole_cluster)
 
 # ============================================================================
-# WORKER LIBRARY
+# WORKER LIBRARY (removed worker_metrics.c dependency)
 # ============================================================================
 add_library(roole_worker STATIC
     src/worker/worker_core.c
     src/worker/message_queue.c
     src/worker/message_handler.c
     src/worker/rpc_handler.c
-    src/worker/worker_metrics.c  # NEW FILE
 )
-
-if(ENABLE_METRICS)
-    target_link_libraries(roole_worker roole_core roole_dag roole_cluster 
-                         ${PROM_LIB} ${PROMHTTP_LIB} pthread m)
-    target_compile_definitions(roole_worker PRIVATE ENABLE_METRICS=1)
-else()
-    target_link_libraries(roole_worker roole_core roole_dag roole_cluster)
-endif()
+target_link_libraries(roole_worker roole_core roole_dag roole_cluster pthread m)
 
 # ============================================================================
 # EXECUTABLES
@@ -135,4 +114,5 @@ message(STATUS "C Compiler: ${CMAKE_C_COMPILER}")
 message(STATUS "C Flags: ${CMAKE_C_FLAGS}")
 message(STATUS "Install Prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "Build Tests: ${BUILD_TESTS}")
+message(STATUS "Metrics: Built-in (no external dependencies)")
 message(STATUS "==============================================")

@@ -8,7 +8,8 @@
 #include "roole/dag.h"
 #include "roole/cluster.h"
 #include "roole/rpc.h"
-#include "roole/worker_metrics.h"
+#include "roole/metrics.h"
+#include "roole/metrics_server.h"
 #include "roole/gossip.h"
 #include <pthread.h>
 
@@ -35,11 +36,11 @@ typedef struct message {
     uint8_t message_data[MAX_MESSAGE_SIZE];
     size_t message_len;
     uint64_t received_at_ms;
-    node_id_t sender_id;  // Original sender (client or router)
+    node_id_t sender_id;
 } message_t;
 
 typedef struct message_queue {
-    message_t *messages;  // CHANGED: tasks -> messages
+    message_t *messages;
     size_t head;
     size_t tail;
     size_t capacity;
@@ -67,12 +68,11 @@ int message_queue_is_empty(message_queue_t *queue);
 typedef struct router_connection {
     node_id_t router_id;
     char ip[MAX_IP_LEN];
-    uint16_t service_port;  // Port for SERVICE channel
-    uint16_t data_port;     // Port for DATA channel
+    uint16_t service_port;
+    uint16_t data_port;
 
-    // Separate RPC channels for service and data communication
-    rpc_channel_t *service_channel;  // For heartbeat, registration, catalog sync
-    rpc_channel_t *data_channel;     // For execution updates
+    rpc_channel_t *service_channel;
+    rpc_channel_t *data_channel;
 
     uint64_t last_sync_ms;
     int active;
@@ -84,9 +84,9 @@ typedef struct router_connection {
 
 typedef struct worker_state {
     node_id_t worker_id;
-    uint16_t gossip_port;      // NUOVO
+    uint16_t gossip_port;
     uint16_t data_port;
-    char bind_addr[MAX_IP_LEN]; // NUOVO
+    char bind_addr[MAX_IP_LEN];
     
     dag_catalog_t dag_catalog;
     uint64_t catalog_version;
@@ -94,7 +94,23 @@ typedef struct worker_state {
     message_queue_t message_queue;
     uint32_t active_executions;
     
-    worker_metrics_t *metrics;
+    // NEW: Dependency-free metrics
+    metrics_registry_t *metrics_registry;
+    metrics_server_t *metrics_server;
+    
+    // Metric handles (for quick access)
+    metrics_t *metric_messages_processed;
+    metrics_t *metric_messages_failed;
+    metrics_t *metric_queue_size;
+    metrics_t *metric_active_executions;
+    metrics_t *metric_uptime_seconds;
+    
+    // Cluster metrics
+    metrics_t *metric_cluster_members_total;
+    metrics_t *metric_cluster_members_active;
+    metrics_t *metric_cluster_members_suspect;
+    metrics_t *metric_cluster_members_dead;
+    
     uint64_t start_time_ms;
     
     router_connection_t routers[MAX_ROUTER_CONNECTIONS];
@@ -103,7 +119,7 @@ typedef struct worker_state {
     
     cluster_view_t cluster_view;
     membership_handle_t *membership;
-    gossip_engine_t *gossip_engine;  // NUOVO: accesso diretto
+    gossip_engine_t *gossip_engine;
     
     pthread_t executor_threads[16];
     size_t num_executor_threads;
@@ -115,11 +131,10 @@ typedef struct worker_state {
 // WORKER API
 // ============================================================================
 
-// Initialization
 int worker_init(worker_state_t *worker, node_id_t worker_id,
                uint16_t gossip_port, uint16_t data_port,
                const char *bind_addr, size_t num_executor_threads, 
-               uint16_t metrics_port);
+               const char *metrics_addr);
 
 int worker_start(worker_state_t *worker);
 
@@ -127,12 +142,10 @@ void worker_shutdown(worker_state_t *worker);
 
 int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *config);
 
-// Message management
 int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
                           rule_id_t dag_id, node_id_t sender_id,
                           const uint8_t *message, size_t message_len);
 
-// Router communication
 int worker_add_router(worker_state_t *worker, node_id_t router_id,
                      const char *ip, uint16_t data_port);
 int worker_remove_router(worker_state_t *worker, node_id_t router_id);
@@ -141,24 +154,25 @@ int worker_send_heartbeat(worker_state_t *worker);
 int worker_send_execution_update(worker_state_t *worker, node_id_t router_id,
                                 execution_id_t exec_id, execution_status_t status);
 
-// Worker registration
 int worker_register_with_router(worker_state_t *worker, const char *router_ip,
                                 uint16_t data_port);
 
-// DAG catalog sync
 int worker_sync_catalog_from_router(worker_state_t *worker, node_id_t router_id);
 
-// Executor thread function
 void* worker_executor_thread_fn(void *arg);
+
+// ============================================================================
+// METRICS HELPERS
+// ============================================================================
+
+void worker_update_cluster_metrics(worker_state_t *worker);
 
 // ============================================================================
 // RPC HANDLERS
 // ============================================================================
 
-// Set global worker state for RPC handlers
 void worker_set_rpc_state(worker_state_t *worker);
 
-// RPC service table for worker
 extern rpc_service_entry_t worker_rpc_service_table[];
 
 #endif // ROOLE_WORKER_H

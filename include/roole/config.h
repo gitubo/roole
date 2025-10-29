@@ -13,6 +13,7 @@ typedef struct node_ports {
     char gossip_addr[MAX_CONFIG_STRING];
     char data_addr[MAX_CONFIG_STRING];
     char ingress_addr[MAX_CONFIG_STRING];
+    char metrics_addr[MAX_CONFIG_STRING];  // NEW: Metrics endpoint address
 } node_ports_t;
 
 typedef struct roole_config {

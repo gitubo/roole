@@ -1,10 +1,12 @@
 // test/router.c - Router binary entry point with INI config support
+// UPDATED: Added metrics support
 
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 #include "roole/router.h"
 #include "roole/config.h"
@@ -41,12 +43,17 @@ int main(int argc, char **argv) {
     }
 
     // Parse port addresses
-    char gossip_ip[16], data_ip[16], ingress_ip[16];
-    uint16_t gossip_port, data_port, ingress_port;
+    char gossip_ip[16], data_ip[16], ingress_ip[16], metrics_ip[16];
+    uint16_t gossip_port, data_port, ingress_port, metrics_port = 0;
     
     config_parse_address(config.ports.gossip_addr, gossip_ip, &gossip_port);
     config_parse_address(config.ports.data_addr, data_ip, &data_port);
     config_parse_address(config.ports.ingress_addr, ingress_ip, &ingress_port);
+    
+    // Parse metrics address if provided
+    if (strlen(config.ports.metrics_addr) > 0) {
+        config_parse_address(config.ports.metrics_addr, metrics_ip, &metrics_port);
+    }
 
     // Validate required ports
     if (gossip_port == 0) {
@@ -79,6 +86,13 @@ int main(int argc, char **argv) {
     LOG_INFO("  DATA: %s (port: %u)", config.ports.data_addr, data_port);
     LOG_INFO("  INGRESS: %s (port: %u)", config.ports.ingress_addr, ingress_port);
     
+    if (metrics_port > 0 && strlen(config.ports.metrics_addr) > 0) {
+        LOG_INFO("  Metrics: %s (http://%s:%u/metrics)", 
+                 config.ports.metrics_addr, metrics_ip, metrics_port);
+    } else {
+        LOG_INFO("  Metrics: DISABLED (not configured)");
+    }
+    
     if (config.router_count > 0) {
         LOG_INFO("  Seed Routers: %zu", config.router_count);
         for (size_t i = 0; i < config.router_count; i++) {
@@ -89,9 +103,9 @@ int main(int argc, char **argv) {
     }
     LOG_INFO("========================================");
 
-    // Initialize router
+    // Initialize router (PASS metrics_addr!)
     if (router_init(&g_router, config.node_id, gossip_port, data_port, ingress_port,
-                   gossip_ip) != RESULT_OK) {
+                   gossip_ip, config.ports.metrics_addr) != RESULT_OK) {
         LOG_ERROR("Failed to initialize router");
         return 1;
     }
@@ -185,19 +199,35 @@ int main(int argc, char **argv) {
     LOG_INFO("  Client requests: %s:%u (INGRESS)", ingress_ip, ingress_port);
     LOG_INFO("  Worker data: %s:%u (DATA)", data_ip, data_port);
     LOG_INFO("  Gossip: %s:%u (UDP)", gossip_ip, gossip_port);
+    if (metrics_port > 0) {
+        LOG_INFO("  Metrics: http://%s:%u/metrics", metrics_ip, metrics_port);
+    }
     LOG_INFO("========================================");
     LOG_INFO("Press Ctrl+C to stop");
     LOG_INFO("");
 
-    // Start RPC servers (this blocks until shutdown)
-    // Note: DATA port = 0 means no separate SERVICE channel
+    // Start RPC servers in a separate thread so we can update metrics
     int rpc_result = rpc_router_run(data_port, ingress_port, router_rpc_service_table);
-    
+
     if (rpc_result != 0) {
         LOG_ERROR("RPC server exited with error: %d", rpc_result);
     }
+
+    // Main loop: update metrics periodically
+    while (!g_shutdown_requested) {
+        sleep(1);
+        
+        // Update uptime metric
+        if (g_router.metric_uptime_seconds) {
+            uint64_t uptime_seconds = (time_now_ms() - g_router.start_time_ms) / 1000;
+            metrics_gauge_set(g_router.metric_uptime_seconds, (double)uptime_seconds);
+        }
+        
+        // Update cluster metrics
+        router_update_cluster_metrics(&g_router);
+    }
     
-    // Cleanup after RPC server stops
+    // Cleanup after shutdown signal
     LOG_INFO("Shutting down router...");
     router_shutdown(&g_router);
     

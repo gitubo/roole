@@ -1,4 +1,5 @@
 // src/core/config.c - INI file parser (no external dependencies)
+// UPDATED: Added metrics_addr parsing
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -208,6 +209,9 @@ int config_load_from_file(const char *path, roole_config_t *config) {
             else if (strcasecmp(key, "ingress_addr") == 0 || strcasecmp(key, "ingress") == 0) {
                 safe_strncpy(config->ports.ingress_addr, value, MAX_CONFIG_STRING);
             }
+            else if (strcasecmp(key, "metrics_addr") == 0 || strcasecmp(key, "metrics") == 0) {
+                safe_strncpy(config->ports.metrics_addr, value, MAX_CONFIG_STRING);
+            }
         }        
         else if (strcasecmp(current_section, "Logging") == 0) {
             if (strcasecmp(key, "level") == 0) {
@@ -220,7 +224,7 @@ int config_load_from_file(const char *path, roole_config_t *config) {
                 } else if (strcasecmp(value, "ERROR") == 0) {
                     config->log_level = LOG_LEVEL_ERROR;
                 } else {
-                    LOG_WARN("Unknown node type: %s", value);
+                    LOG_WARN("Unknown log level: %s", value);
                     config->log_level = LOG_LEVEL_INFO;
                 }
             }
@@ -267,6 +271,11 @@ int config_load_from_file(const char *path, roole_config_t *config) {
     LOG_INFO("  Data: %s", config->ports.data_addr);
     if (strlen(config->ports.ingress_addr) > 0) {
         LOG_INFO("  Ingress: %s", config->ports.ingress_addr);
+    }
+    if (strlen(config->ports.metrics_addr) > 0) {
+        LOG_INFO("  Metrics: %s", config->ports.metrics_addr);
+    } else {
+        LOG_DEBUG("  Metrics: not configured");
     }
     LOG_INFO("  Seed routers: %zu", config->router_count);
     

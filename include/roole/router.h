@@ -8,6 +8,8 @@
 #include "roole/cluster.h"
 #include "roole/rpc.h"
 #include "roole/gossip.h"
+#include "roole/metrics.h"
+#include "roole/metrics_server.h"
 #include <pthread.h>
 
 // ============================================================================
@@ -154,6 +156,20 @@ typedef struct router_state {
 
     pthread_t cleanup_thread;
 
+    // NEW: Metrics
+    metrics_registry_t *metrics_registry;
+    metrics_server_t *metrics_server;
+    
+    metrics_t *metric_messages_routed_total;
+    metrics_t *metric_messages_routed_failed;
+    metrics_t *metric_uptime_seconds;
+    metrics_t *metric_cluster_members_total;
+    metrics_t *metric_cluster_members_active;
+    metrics_t *metric_cluster_members_suspect;
+    metrics_t *metric_cluster_members_dead;
+    
+    uint64_t start_time_ms;
+
     int shutdown_flag;
 } router_state_t;
 
@@ -185,6 +201,12 @@ int router_on_worker_failed(router_state_t *router, node_id_t worker_id);
 
 int router_on_execution_update(router_state_t *router, execution_id_t exec_id,
                               execution_status_t status);
+
+// ============================================================================
+// METRICS HELPERS
+// ============================================================================
+
+void router_update_cluster_metrics(router_state_t *router);
 
 // ============================================================================
 // LOAD BALANCING STRATEGIES

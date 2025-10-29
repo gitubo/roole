@@ -1,0 +1,23 @@
+
+global:
+  scrape_interval: 15s
+  
+scrape_configs:
+  - job_name: 'router_1'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['roole:7002']
+        labels:
+          cluster: 'my_test_cluster'
+  - job_name: 'worker_100'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['roole:7102']
+        labels:
+          cluster: 'my_test_cluster'
+  - job_name: 'worker_200'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['roole:7202']
+        labels:
+          cluster: 'my_test_cluster'

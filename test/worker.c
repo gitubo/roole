@@ -1,4 +1,5 @@
 // test/worker.c - Worker binary entry point with INI config support
+// UPDATED: Uses new metrics system from config
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -7,6 +8,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <string.h>
+
 #include "roole/worker.h"
 #include "roole/config.h"
 #include "roole/common.h"
@@ -39,13 +42,14 @@ static void signal_handler(int sig) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <config_file.ini> [num_threads] [metrics_port]\n", argv[0]);
-        fprintf(stderr, "Example: %s config/worker.ini 4 9090\n", argv[0]);
+        fprintf(stderr, "Usage: %s <config_file.ini> [num_threads]\n", argv[0]);
+        fprintf(stderr, "Example: %s config/worker_100.ini 4\n", argv[0]);
         fprintf(stderr, "\n");
         fprintf(stderr, "Arguments:\n");
         fprintf(stderr, "  config_file.ini  - INI configuration file (required)\n");
         fprintf(stderr, "  num_threads      - Number of executor threads (default: 4)\n");
-        fprintf(stderr, "  metrics_port     - Prometheus metrics port (default: 9090, 0 to disable)\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "Note: Metrics port is now configured in the INI file under [Node] metrics_addr\n");
         return 1;
     }
 
@@ -63,9 +67,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Optional command-line parameters
+    // Optional command-line parameter
     size_t num_threads = (argc >= 3) ? (size_t)atoi(argv[2]) : 4;
-    uint16_t metrics_port = (argc >= 4) ? (uint16_t)atoi(argv[3]) : 9090;
 
     // Validate num_threads
     if (num_threads == 0 || num_threads > 16) {
@@ -74,11 +77,16 @@ int main(int argc, char **argv) {
     }
 
     // Parse addresses
-    char gossip_ip[16], data_ip[16];
-    uint16_t gossip_port, data_port;
+    char gossip_ip[16], data_ip[16], metrics_ip[16];
+    uint16_t gossip_port, data_port, metrics_port = 0;
     
     config_parse_address(config.ports.gossip_addr, gossip_ip, &gossip_port);
     config_parse_address(config.ports.data_addr, data_ip, &data_port);
+    
+    // Parse metrics address if provided
+    if (strlen(config.ports.metrics_addr) > 0) {
+        config_parse_address(config.ports.metrics_addr, metrics_ip, &metrics_port);
+    }
 
     // Validate required ports
     if (gossip_port == 0) {
@@ -109,10 +117,11 @@ int main(int argc, char **argv) {
     LOG_INFO("  DATA: %s (port: %u)", config.ports.data_addr, data_port);
     LOG_INFO("  Executor Threads: %zu", num_threads);
     
-    if (metrics_port > 0) {
-        LOG_INFO("  Metrics Port: %u (http://0.0.0.0:%u/metrics)", metrics_port, metrics_port);
+    if (metrics_port > 0 && strlen(config.ports.metrics_addr) > 0) {
+        LOG_INFO("  Metrics: %s (http://%s:%u/metrics)", 
+                 config.ports.metrics_addr, metrics_ip, metrics_port);
     } else {
-        LOG_INFO("  Metrics: DISABLED");
+        LOG_INFO("  Metrics: DISABLED (not configured)");
     }
     
     if (config.router_count > 0) {
@@ -127,7 +136,7 @@ int main(int argc, char **argv) {
 
     // Initialize worker
     if (worker_init(&g_worker, config.node_id, gossip_port, data_port, 
-                   gossip_ip, num_threads, metrics_port) != RESULT_OK) {
+                   gossip_ip, num_threads, config.ports.metrics_addr) != RESULT_OK) {
         LOG_ERROR("Failed to initialize worker");
         return 1;
     }
@@ -187,22 +196,22 @@ int main(int argc, char **argv) {
     LOG_INFO("========================================");
     LOG_INFO("Worker is now running");
     LOG_INFO("  Data: %s:%u", data_ip, data_port);
-    LOG_INFO("  Service: %s:%u (Gossip)", gossip_ip, gossip_port);
+    LOG_INFO("  Gossip: %s:%u (UDP)", gossip_ip, gossip_port);
     if (metrics_port > 0) {
-        LOG_INFO("  Metrics: http://0.0.0.0:%u/metrics", metrics_port);
+        LOG_INFO("  Metrics: http://%s:%u/metrics", metrics_ip, metrics_port);
     }
     LOG_INFO("========================================");
     LOG_INFO("Press Ctrl+C to stop");
     LOG_INFO("");
     
-    // Main loop: wait for shutdown signal
+    // Main loop: wait for shutdown signal and update metrics
     while (!g_shutdown_requested) {
         sleep(1);
         
-        // Periodically update metrics
-        if (g_worker.metrics && metrics_port > 0) {
+        // Periodically update uptime metric
+        if (g_worker.metric_uptime_seconds) {
             uint64_t uptime_seconds = (time_now_ms() - g_worker.start_time_ms) / 1000;
-            worker_metrics_set_uptime(g_worker.metrics, uptime_seconds);
+            metrics_gauge_set(g_worker.metric_uptime_seconds, (double)uptime_seconds);
         }
     }
     
