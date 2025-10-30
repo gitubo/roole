@@ -55,7 +55,8 @@ static void* router_cleanup_thread_fn(void *arg) {
 
 int router_init(router_state_t *router, node_id_t router_id,
                uint16_t gossip_port, uint16_t data_port, uint16_t ingress_port,
-               const char *bind_addr, const char *metrics_addr) {
+               const char *bind_addr, const char *metrics_addr,
+               const char *cluster_name) {
     if (!router) return RESULT_ERR_INVALID;
 
     memset(router, 0, sizeof(router_state_t));
@@ -64,6 +65,7 @@ int router_init(router_state_t *router, node_id_t router_id,
     router->data_port = data_port;
     router->ingress_port = ingress_port;
     router->shutdown_flag = 0;
+    safe_strncpy(router->cluster_name, cluster_name, MAX_CONFIG_STRING);
     
     safe_strncpy(router->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
     
@@ -133,11 +135,14 @@ int router_init(router_state_t *router, node_id_t router_id,
                 char router_id_str[32];
                 snprintf(router_id_str, sizeof(router_id_str), "%u", router_id);
                 
-                metric_label_t labels[2];
+                size_t NUMBER_OF_LABELS = 3;
+                metric_label_t labels[NUMBER_OF_LABELS];
                 safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
                 safe_strncpy(labels[0].value, router_id_str, MAX_LABEL_VALUE_LEN);
                 safe_strncpy(labels[1].name, "node_type", MAX_LABEL_NAME_LEN);
                 safe_strncpy(labels[1].value, "router", MAX_LABEL_VALUE_LEN);
+                safe_strncpy(labels[2].name, "cluster_name", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[2].value, router->cluster_name, MAX_LABEL_VALUE_LEN);
                 
                 LOG_DEBUG("Creating router metrics with labels: node_id=%s, node_type=router", 
                          router_id_str);
@@ -145,16 +150,16 @@ int router_init(router_state_t *router, node_id_t router_id,
                 // Create counter metrics
                 router->metric_messages_routed_total = metrics_get_or_create_counter(
                     router->metrics_registry,
-                    "router_messages_routed_total",
+                    "messages_routed_total",
                     "Total number of messages successfully routed to workers",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 router->metric_messages_routed_failed = metrics_get_or_create_counter(
                     router->metrics_registry,
-                    "router_messages_routed_failed",
+                    "messages_routed_failed",
                     "Total number of messages that failed to route",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 // Create gauge metrics
@@ -162,7 +167,7 @@ int router_init(router_state_t *router, node_id_t router_id,
                     router->metrics_registry,
                     "uptime_seconds",
                     "Node uptime in seconds",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 // Cluster metrics
@@ -170,28 +175,28 @@ int router_init(router_state_t *router, node_id_t router_id,
                     router->metrics_registry,
                     "cluster_members_total",
                     "Total number of cluster members known to this node",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 router->metric_cluster_members_active = metrics_get_or_create_gauge(
                     router->metrics_registry,
                     "cluster_members_active",
                     "Number of active cluster members",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 router->metric_cluster_members_suspect = metrics_get_or_create_gauge(
                     router->metrics_registry,
                     "cluster_members_suspect",
                     "Number of suspected cluster members",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 router->metric_cluster_members_dead = metrics_get_or_create_gauge(
                     router->metrics_registry,
                     "cluster_members_dead",
                     "Number of dead cluster members",
-                    2, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 LOG_INFO("Metrics created successfully, starting HTTP server...");

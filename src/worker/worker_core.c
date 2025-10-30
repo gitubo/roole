@@ -156,7 +156,7 @@ void* worker_executor_thread_fn(void *arg) {
 int worker_init(worker_state_t *worker, node_id_t worker_id,
                uint16_t gossip_port, uint16_t data_port,
                const char *bind_addr, size_t num_executor_threads, 
-               const char *metrics_addr) {
+               const char *metrics_addr, const char *cluster_name) {
     if (!worker || num_executor_threads == 0 || num_executor_threads > 16) {
         return RESULT_ERR_INVALID;
     }
@@ -170,6 +170,7 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     worker->active_executions = 0;
     worker->catalog_version = 0;
     worker->start_time_ms = time_now_ms();
+    safe_strncpy(worker->cluster_name, cluster_name, MAX_CONFIG_STRING);
     
     safe_strncpy(worker->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
     
@@ -239,47 +240,74 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
                 char worker_id_str[32];
                 snprintf(worker_id_str, sizeof(worker_id_str), "%u", worker_id);
                 
-                metric_label_t labels[1];
-                safe_strncpy(labels[0].name, "worker_id", MAX_LABEL_NAME_LEN);
+                size_t NUMBER_OF_LABELS = 3;
+                metric_label_t labels[NUMBER_OF_LABELS];
+                safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
                 safe_strncpy(labels[0].value, worker_id_str, MAX_LABEL_VALUE_LEN);
+                safe_strncpy(labels[1].name, "node_type", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[1].value, "worker", MAX_LABEL_VALUE_LEN);
+                safe_strncpy(labels[2].name, "cluster_name", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[2].value, worker->cluster_name, MAX_LABEL_VALUE_LEN);
                 
                 LOG_DEBUG("Creating worker metrics with label worker_id=%s", worker_id_str);
                 
                 // Create counter metrics
                 worker->metric_messages_processed = metrics_get_or_create_counter(
                     worker->metrics_registry,
-                    "roole_worker_messages_processed_total",
+                    "messages_processed_total",
                     "Total number of messages successfully processed",
-                    1, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 worker->metric_messages_failed = metrics_get_or_create_counter(
                     worker->metrics_registry,
-                    "roole_worker_messages_failed_total",
+                    "messages_failed_total",
                     "Total number of messages that failed processing",
-                    1, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 // Create gauge metrics
                 worker->metric_queue_size = metrics_get_or_create_gauge(
                     worker->metrics_registry,
-                    "roole_worker_queue_size",
+                    "messages_queue_size",
                     "Current number of messages in worker queue",
-                    1, labels
-                );
-                
-                worker->metric_active_executions = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "roole_worker_active_executions",
-                    "Current number of messages being processed",
-                    1, labels
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 worker->metric_uptime_seconds = metrics_get_or_create_gauge(
                     worker->metrics_registry,
-                    "roole_worker_uptime_seconds",
+                    "uptime_seconds",
                     "Worker uptime in seconds",
-                    1, labels
+                    NUMBER_OF_LABELS, labels
+                );
+
+                // Cluster metrics (add these - they were missing!)
+                worker->metric_cluster_members_total = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_total",
+                    "Total number of cluster members known to this node",
+                    NUMBER_OF_LABELS, labels
+                );
+
+                worker->metric_cluster_members_active = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_active",
+                    "Number of active cluster members",
+                    NUMBER_OF_LABELS, labels
+                );
+
+                worker->metric_cluster_members_suspect = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_suspect",
+                    "Number of suspected cluster members",
+                    NUMBER_OF_LABELS, labels
+                );
+
+                worker->metric_cluster_members_dead = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_dead",
+                    "Number of dead cluster members",
+                    NUMBER_OF_LABELS, labels
                 );
                 
                 LOG_INFO("Metrics created successfully, starting HTTP server...");

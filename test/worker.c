@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
 
     // Initialize worker
     if (worker_init(&g_worker, config.node_id, gossip_port, data_port, 
-                   gossip_ip, num_threads, config.ports.metrics_addr) != RESULT_OK) {
+                   gossip_ip, num_threads, config.ports.metrics_addr, config.cluster_name) != RESULT_OK) {
         LOG_ERROR("Failed to initialize worker");
         return 1;
     }

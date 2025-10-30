@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
 
     // Initialize router (PASS metrics_addr!)
     if (router_init(&g_router, config.node_id, gossip_port, data_port, ingress_port,
-                   gossip_ip, config.ports.metrics_addr) != RESULT_OK) {
+                   gossip_ip, config.ports.metrics_addr, config.cluster_name) != RESULT_OK) {
         LOG_ERROR("Failed to initialize router");
         return 1;
     }

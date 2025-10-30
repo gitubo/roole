@@ -84,6 +84,7 @@ typedef struct router_connection {
 
 typedef struct worker_state {
     node_id_t worker_id;
+    char cluster_name[MAX_CONFIG_STRING];
     uint16_t gossip_port;
     uint16_t data_port;
     char bind_addr[MAX_IP_LEN];
@@ -134,7 +135,7 @@ typedef struct worker_state {
 int worker_init(worker_state_t *worker, node_id_t worker_id,
                uint16_t gossip_port, uint16_t data_port,
                const char *bind_addr, size_t num_executor_threads, 
-               const char *metrics_addr);
+               const char *metrics_addr, const char *cluster_name);
 
 int worker_start(worker_state_t *worker);
 
