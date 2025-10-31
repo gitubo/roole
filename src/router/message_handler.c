@@ -64,11 +64,11 @@ int handle_submit_message(rpc_async_context_t *context,
     }
     
     // 4. Get worker info and send message to worker
-    worker_info_t *worker = worker_pool_get(&g_router_state->worker_pool, worker_id);
+    peer_info_t *worker = peer_pool_get(&g_router_state->worker_pool, worker_id);
     if (!worker || !worker->data_channel) {
         LOG_ERROR("Worker %u not found or not connected", worker_id);
         execution_tracker_update_status(&g_router_state->exec_tracker, exec_id, EXEC_STATUS_FAILED);
-        worker_pool_release(&g_router_state->worker_pool);
+        peer_pool_release(&g_router_state->worker_pool);
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
@@ -76,7 +76,7 @@ int handle_submit_message(rpc_async_context_t *context,
     size_t worker_payload_len = 8 + 4 + 2 + message_len;
     uint8_t *worker_payload = malloc(worker_payload_len);
     if (!worker_payload) {
-        worker_pool_release(&g_router_state->worker_pool);
+        peer_pool_release(&g_router_state->worker_pool);
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
@@ -101,7 +101,7 @@ int handle_submit_message(rpc_async_context_t *context,
                        worker->data_channel->tx_buffer, rpc_msg_len, 0);
     
     free(worker_payload);
-    worker_pool_release(&g_router_state->worker_pool);
+    peer_pool_release(&g_router_state->worker_pool);
     
     if (sent <= 0) {
         LOG_ERROR("Failed to send message to worker %u", worker_id);

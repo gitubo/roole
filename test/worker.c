@@ -42,15 +42,37 @@ static void signal_handler(int sig) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <config_file.ini> [num_threads]\n", argv[0]);
-        fprintf(stderr, "Example: %s config/worker_100.ini 4\n", argv[0]);
         fprintf(stderr, "\n");
-        fprintf(stderr, "Arguments:\n");
-        fprintf(stderr, "  config_file.ini  - INI configuration file (required)\n");
-        fprintf(stderr, "  num_threads      - Number of executor threads (default: 4)\n");
+        fprintf(stderr, "NOTE: This is the LEGACY worker binary.\n");
+        fprintf(stderr, "Consider using the unified 'node' binary instead:\n");
+        fprintf(stderr, "  ./node config/worker_100.ini 4\n");
         fprintf(stderr, "\n");
-        fprintf(stderr, "Note: Metrics port is now configured in the INI file under [Node] metrics_addr\n");
         return 1;
     }
+
+    LOG_WARN("========================================");
+    LOG_WARN("LEGACY BINARY NOTICE");
+    LOG_WARN("========================================");
+    LOG_WARN("You are using the legacy 'worker' binary.");
+    LOG_WARN("This binary will be deprecated in a future release.");
+    LOG_WARN("");
+    LOG_WARN("Migration: Use the unified 'node' binary instead:");
+    
+    if (argc >= 3) {
+        LOG_WARN("  ./node %s %s", argv[1], argv[2]);
+    } else {
+        LOG_WARN("  ./node %s", argv[1]);
+    }
+    
+    LOG_WARN("");
+    LOG_WARN("The unified binary supports:");
+    LOG_WARN("  - Same configuration files");
+    LOG_WARN("  - Automatic capability detection");
+    LOG_WARN("  - Hybrid node deployment");
+    LOG_WARN("========================================");
+    LOG_WARN("");
+    
+    sleep(2);  // Give user time to read notice
 
     // Load configuration from INI file
     roole_config_t config;
@@ -148,6 +170,31 @@ int main(int argc, char **argv) {
         worker_shutdown(&g_worker);
         return 1;
     }
+
+    // Create unified node wrapper for capability testing
+    unified_node_t test_node;
+    memset(&test_node, 0, sizeof(unified_node_t));
+    
+    test_node.node_id = config.node_id;
+    safe_strncpy(test_node.cluster_name, config.cluster_name, MAX_CONFIG_STRING);
+    
+    // Detect capabilities
+    node_detect_capabilities(&test_node, &config);
+    node_print_capabilities(&test_node);
+    
+    // Verify worker configuration
+    if (test_node.capabilities.has_ingress) {
+        LOG_WARN("Worker has ingress capability (unusual configuration)");
+        LOG_WARN("Workers typically don't accept direct client requests");
+        LOG_WARN("Consider removing ingress_addr from %s", argv[1]);
+    }
+    
+    LOG_INFO("");
+    LOG_INFO("Capability Explanation:");
+    LOG_INFO("  - INGRESS: Disabled (workers don't accept client requests)");
+    LOG_INFO("  - EXECUTE: Processes messages routed from ingress nodes");
+    LOG_INFO("  - ROUTE: Can forward messages to other nodes if needed");
+    LOG_INFO("");
     
     LOG_INFO("Worker executor threads started (%zu threads)", num_threads);
     
@@ -170,28 +217,31 @@ int main(int argc, char **argv) {
     sleep(1);
     LOG_INFO("RPC server thread started");
 
-    // Bootstrap: join cluster via gossip
+    // Bootstrap using unified node bootstrap
     if (config.router_count > 0) {
         LOG_INFO("Bootstrapping worker from cluster...");
         
-        int bootstrap_result = worker_bootstrap_from_config(&g_worker, &config);
+        // Create temporary unified node for bootstrap
+        unified_node_t temp_node;
+        temp_node.node_id = g_worker.worker_id;
+        //temp_node.bind_addr = g_worker.bind_addr;
+        safe_strncpy(temp_node.bind_addr, g_worker.bind_addr, MAX_IP_LEN);
+        temp_node.gossip_port = g_worker.gossip_port;
+        temp_node.data_port = g_worker.data_port;
+        temp_node.peer_pool = g_worker.worker_pool;  // Share peer pool
+        temp_node.gossip_engine = g_worker.gossip_engine;
+        
+        int bootstrap_result = node_bootstrap_with_retry(&temp_node, &config, 3);
         
         if (bootstrap_result == RESULT_OK) {
             LOG_INFO("Worker bootstrap completed successfully");
-            LOG_INFO("Connected to cluster, ready to receive messages");
-        } else if (bootstrap_result == RESULT_ERR_TIMEOUT) {
-            LOG_WARN("Worker bootstrap timed out (no response from seed routers)");
-            LOG_WARN("Will retry via gossip protocol in background");
         } else {
-            LOG_WARN("Worker bootstrap failed (error: %d)", bootstrap_result);
-            LOG_WARN("Will retry via gossip protocol in background");
+            LOG_WARN("Bootstrap incomplete, will retry via gossip");
         }
     } else {
         LOG_WARN("No seed routers configured!");
-        LOG_WARN("Worker running in standalone mode (not connected to cluster)");
-        LOG_WARN("Add 'routers' configuration to join a cluster");
     }
-    
+        
     LOG_INFO("========================================");
     LOG_INFO("Worker is now running");
     LOG_INFO("  Data: %s:%u", data_ip, data_port);

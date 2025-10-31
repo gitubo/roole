@@ -16,10 +16,11 @@ router_state_t *g_router_state = NULL;
 int handle_submit_message(rpc_async_context_t *context, 
                           const uint8_t *in_data, size_t in_len);
 
-
+/*
 void router_set_rpc_state(router_state_t *router) {
     g_router_state = router;
 }
+*/
 
 // ============================================================================
 // HANDLER: Get Execution Status (Client -> Router)

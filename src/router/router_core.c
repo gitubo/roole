@@ -66,15 +66,38 @@ int router_init(router_state_t *router, node_id_t router_id,
     router->ingress_port = ingress_port;
     router->shutdown_flag = 0;
     safe_strncpy(router->cluster_name, cluster_name, MAX_CONFIG_STRING);
-    
     safe_strncpy(router->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
     
+    // Detect capabilities from config
+    roole_config_t temp_config;
+    memset(&temp_config, 0, sizeof(temp_config));
+    safe_strncpy(temp_config.cluster_name, cluster_name, MAX_CONFIG_STRING);
+    safe_strncpy(temp_config.ports.ingress_addr, bind_addr, MAX_CONFIG_STRING);
+    
+    // Build ingress address string
+    char ingress_addr_str[MAX_CONFIG_STRING];
+    snprintf(ingress_addr_str, MAX_CONFIG_STRING, "%s:%u", bind_addr, ingress_port);
+    safe_strncpy(temp_config.ports.ingress_addr, ingress_addr_str, MAX_CONFIG_STRING);
+    
+    // Create temp unified node for capability detection
+    unified_node_t temp_node;
+    temp_node.node_id = router_id;
+    safe_strncpy(temp_node.cluster_name, cluster_name, MAX_CONFIG_STRING);
+    
+    node_detect_capabilities(&temp_node, &temp_config);
+    
+    LOG_INFO("Router capabilities detected:");
+    LOG_INFO("  has_ingress: %d", temp_node.capabilities.has_ingress);
+    LOG_INFO("  can_execute: %d", temp_node.capabilities.can_execute);
+    LOG_INFO("  can_route: %d", temp_node.capabilities.can_route);
+
+
     if (dag_catalog_init(&router->dag_catalog, MAX_DAGS) != RESULT_OK) {
         LOG_ERROR("Failed to initialize DAG catalog");
         return RESULT_ERR_INVALID;
     }
     
-    if (worker_pool_init(&router->worker_pool, MAX_WORKERS) != RESULT_OK) {
+    if (peer_pool_init(&router->worker_pool, MAX_PEERS) != RESULT_OK) {
         LOG_ERROR("Failed to initialize worker pool");
         dag_catalog_destroy(&router->dag_catalog);
         return RESULT_ERR_INVALID;
@@ -82,7 +105,7 @@ int router_init(router_state_t *router, node_id_t router_id,
     
     if (execution_tracker_init(&router->exec_tracker, MAX_PENDING_EXECUTIONS) != RESULT_OK) {
         LOG_ERROR("Failed to initialize execution tracker");
-        worker_pool_destroy(&router->worker_pool);
+        peer_pool_destroy(&router->worker_pool);
         dag_catalog_destroy(&router->dag_catalog);
         return RESULT_ERR_INVALID;
     }
@@ -90,7 +113,7 @@ int router_init(router_state_t *router, node_id_t router_id,
     if (cluster_view_init(&router->cluster_view, MAX_CLUSTER_NODES) != RESULT_OK) {
         LOG_ERROR("Failed to initialize cluster view");
         execution_tracker_destroy(&router->exec_tracker);
-        worker_pool_destroy(&router->worker_pool);
+        peer_pool_destroy(&router->worker_pool);
         dag_catalog_destroy(&router->dag_catalog);
         return RESULT_ERR_INVALID;
     }
@@ -100,7 +123,7 @@ int router_init(router_state_t *router, node_id_t router_id,
         LOG_ERROR("Failed to initialize membership");
         cluster_view_destroy(&router->cluster_view);
         execution_tracker_destroy(&router->exec_tracker);
-        worker_pool_destroy(&router->worker_pool);
+        peer_pool_destroy(&router->worker_pool);
         dag_catalog_destroy(&router->dag_catalog);
         return RESULT_ERR_INVALID;
     }
@@ -114,114 +137,30 @@ int router_init(router_state_t *router, node_id_t router_id,
     // METRICS INITIALIZATION
     // ========================================================================
     
+    router->start_time_ms = time_now_ms();
+    
     if (metrics_addr && strlen(metrics_addr) > 0) {
-        char metrics_ip[16];
-        uint16_t metrics_port;
-        config_parse_address(metrics_addr, metrics_ip, &metrics_port);
+        // Use unified metrics system (temporary bridge until full migration)
+        unified_node_t temp_node;
+        temp_node.node_id = router->router_id;
+        safe_strncpy(temp_node.cluster_name, router->cluster_name, MAX_CONFIG_STRING);
+        temp_node.start_time_ms = router->start_time_ms;
+        temp_node.cluster_view = router->cluster_view;
         
-        LOG_INFO("Metrics configuration: addr='%s', parsed ip='%s', port=%u", 
-                 metrics_addr, metrics_ip, metrics_port);
-        
-        if (metrics_port > 0) {
-            LOG_INFO("Initializing router metrics system...");
-            
-            router->metrics_registry = metrics_registry_init();
-            if (!router->metrics_registry) {
-                LOG_WARN("Failed to initialize metrics registry - continuing without metrics");
-            } else {
-                LOG_INFO("Metrics registry initialized successfully");
-                
-                // Create metric labels: node_id and node_type
-                char router_id_str[32];
-                snprintf(router_id_str, sizeof(router_id_str), "%u", router_id);
-                
-                size_t NUMBER_OF_LABELS = 3;
-                metric_label_t labels[NUMBER_OF_LABELS];
-                safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[0].value, router_id_str, MAX_LABEL_VALUE_LEN);
-                safe_strncpy(labels[1].name, "node_type", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[1].value, "router", MAX_LABEL_VALUE_LEN);
-                safe_strncpy(labels[2].name, "cluster_name", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[2].value, router->cluster_name, MAX_LABEL_VALUE_LEN);
-                
-                LOG_DEBUG("Creating router metrics with labels: node_id=%s, node_type=router", 
-                         router_id_str);
-                
-                // Create counter metrics
-                router->metric_messages_routed_total = metrics_get_or_create_counter(
-                    router->metrics_registry,
-                    "messages_routed_total",
-                    "Total number of messages successfully routed to workers",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                router->metric_messages_routed_failed = metrics_get_or_create_counter(
-                    router->metrics_registry,
-                    "messages_routed_failed",
-                    "Total number of messages that failed to route",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                // Create gauge metrics
-                router->metric_uptime_seconds = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "uptime_seconds",
-                    "Node uptime in seconds",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                // Cluster metrics
-                router->metric_cluster_members_total = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_total",
-                    "Total number of cluster members known to this node",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                router->metric_cluster_members_active = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_active",
-                    "Number of active cluster members",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                router->metric_cluster_members_suspect = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_suspect",
-                    "Number of suspected cluster members",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                router->metric_cluster_members_dead = metrics_get_or_create_gauge(
-                    router->metrics_registry,
-                    "cluster_members_dead",
-                    "Number of dead cluster members",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                LOG_INFO("Metrics created successfully, starting HTTP server...");
-                
-                // Start metrics HTTP server
-                router->metrics_server = metrics_server_start(
-                    router->metrics_registry,
-                    metrics_ip,
-                    metrics_port
-                );
-                
-                if (!router->metrics_server) {
-                    LOG_ERROR("Failed to start metrics HTTP server on %s:%u", 
-                            metrics_ip, metrics_port);
-                    LOG_WARN("Continuing without metrics endpoint");
-                } else {
-                    LOG_INFO("Metrics HTTP server started successfully on http://%s:%u/metrics", 
-                            metrics_ip, metrics_port);
-                }
-            }
-        } else {
-            LOG_WARN("Metrics disabled: invalid port=%u in config", metrics_port);
+        if (node_metrics_init(&temp_node, metrics_addr) == RESULT_OK) {
+            // Copy metrics handles back to router
+            router->metrics_registry = temp_node.metrics_registry;
+            router->metrics_server = temp_node.metrics_server;
+            router->metric_messages_routed_total = temp_node.metric_messages_routed;
+            router->metric_messages_routed_failed = temp_node.metric_messages_failed;
+            router->metric_uptime_seconds = temp_node.metric_uptime_seconds;
+            router->metric_cluster_members_total = temp_node.metric_cluster_members_total;
+            router->metric_cluster_members_active = temp_node.metric_cluster_members_active;
+            router->metric_cluster_members_suspect = temp_node.metric_cluster_members_suspect;
+            router->metric_cluster_members_dead = temp_node.metric_cluster_members_dead;
         }
     } else {
-        LOG_INFO("Metrics disabled: no metrics_addr configured");
+        LOG_INFO("Metrics disabled for router");
         router->metrics_registry = NULL;
         router->metrics_server = NULL;
     }
@@ -240,6 +179,14 @@ int router_start(router_state_t *router) {
         return RESULT_ERR_INVALID;
     }
     
+    // Start executor threads if router has execution capability
+    // (For now, routers don't execute - this is for future hybrid nodes)
+    // unified_node_t temp_node;
+    // temp_node.capabilities.can_execute = 0;  // Routers don't execute yet
+    // if (temp_node.capabilities.can_execute) {
+    //     node_start_executors(&temp_node);
+    // }
+
     LOG_INFO("Router %u started", router->router_id);
     return RESULT_OK;
 }
@@ -259,7 +206,7 @@ void router_shutdown(router_state_t *router) {
     
     cluster_view_destroy(&router->cluster_view);
     execution_tracker_destroy(&router->exec_tracker);
-    worker_pool_destroy(&router->worker_pool);
+    peer_pool_destroy(&router->worker_pool);
     dag_catalog_destroy(&router->dag_catalog);
     
     LOG_INFO("Router %u shutdown complete", router->router_id);
@@ -389,11 +336,11 @@ int router_on_worker_join(router_state_t *router, node_id_t worker_id,
 
     LOG_INFO("Worker %u joined (%s DATA:%u)", worker_id, ip, data_port);// Add to worker pool
 
-    int result = worker_pool_add(&router->worker_pool, worker_id, ip, data_port);
+    int result = peer_pool_add(&router->worker_pool, worker_id, ip, 0, data_port);
     if (result != RESULT_OK && result != RESULT_ERR_EXISTS) {
         return result;
     }// Establish DATA channel connection
-    worker_info_t *worker = worker_pool_get(&router->worker_pool, worker_id);
+    peer_info_t *worker = peer_pool_get(&router->worker_pool, worker_id);
     if (worker) {
         if (!worker->data_channel) {
             worker->data_channel = safe_malloc(sizeof(rpc_channel_t));
@@ -409,7 +356,7 @@ int router_on_worker_join(router_state_t *router, node_id_t worker_id,
             } else {
                 LOG_ERROR("Failed to allocate DATA channel for worker %u", worker_id);
             }
-        }    worker_pool_release(&router->worker_pool);
+        }    peer_pool_release(&router->worker_pool);
     }
     return RESULT_OK;
 }
@@ -417,7 +364,7 @@ int router_on_worker_join(router_state_t *router, node_id_t worker_id,
 int router_on_worker_failed(router_state_t *router, node_id_t worker_id) {
     if (!router) return RESULT_ERR_INVALID;
     LOG_ERROR("Worker %u failed - initiating recovery", worker_id);
-    worker_pool_update_status(&router->worker_pool, worker_id, NODE_STATUS_DEAD);
+    peer_pool_update_status(&router->worker_pool, worker_id, NODE_STATUS_DEAD);
     execution_id_t pending_execs[MAX_PENDING_EXECUTIONS];
     size_t count = execution_tracker_get_by_worker(&router->exec_tracker, 
                                                worker_id, pending_execs, 
@@ -453,46 +400,15 @@ int router_on_execution_update(router_state_t *router, execution_id_t exec_id, e
 
 
 void router_update_cluster_metrics(router_state_t *router) {
-    if (!router || !router->cluster_view.members) return;
+    if (!router) return;
     
-    pthread_rwlock_rdlock(&router->cluster_view.lock);
+    // Bridge to unified metrics (temporary)
+    unified_node_t temp_node;
+    temp_node.cluster_view = router->cluster_view;
+    temp_node.metric_cluster_members_total = router->metric_cluster_members_total;
+    temp_node.metric_cluster_members_active = router->metric_cluster_members_active;
+    temp_node.metric_cluster_members_suspect = router->metric_cluster_members_suspect;
+    temp_node.metric_cluster_members_dead = router->metric_cluster_members_dead;
     
-    size_t total = router->cluster_view.count;
-    size_t active = 0;
-    size_t suspect = 0;
-    size_t dead = 0;
-    
-    for (size_t i = 0; i < total; i++) {
-        cluster_member_t *member = &router->cluster_view.members[i];
-        
-        switch (member->status) {
-            case NODE_STATUS_ALIVE:
-                active++;
-                break;
-            case NODE_STATUS_SUSPECT:
-                suspect++;
-                break;
-            case NODE_STATUS_DEAD:
-                dead++;
-                break;
-            default:
-                break;
-        }
-    }
-    
-    pthread_rwlock_unlock(&router->cluster_view.lock);
-    
-    // Update metrics
-    if (router->metric_cluster_members_total) {
-        metrics_gauge_set(router->metric_cluster_members_total, (double)total);
-    }
-    if (router->metric_cluster_members_active) {
-        metrics_gauge_set(router->metric_cluster_members_active, (double)active);
-    }
-    if (router->metric_cluster_members_suspect) {
-        metrics_gauge_set(router->metric_cluster_members_suspect, (double)suspect);
-    }
-    if (router->metric_cluster_members_dead) {
-        metrics_gauge_set(router->metric_cluster_members_dead, (double)dead);
-    }
+    node_metrics_update_cluster(&temp_node);
 }

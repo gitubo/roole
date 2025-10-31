@@ -21,6 +21,21 @@ add_library(roole_core STATIC
 target_link_libraries(roole_core pthread m)
 
 # ============================================================================
+# NODE LIBRARY (Unified node structures)
+# ============================================================================
+add_library(roole_node STATIC
+    src/node/peer_pool.c
+    src/node/node_metrics.c
+    src/node/node_rpc.c
+    src/node/node_handlers.c
+    src/node/node_executor.c
+    src/node/node_capabilities.c
+    src/node/node_core.c
+    src/node/node_bootstrap.c
+)
+target_link_libraries(roole_node roole_core)
+
+# ============================================================================
 # DAG LIBRARY (DAG catalog + execution engine)
 # ============================================================================
 add_library(roole_dag STATIC
@@ -41,7 +56,7 @@ add_library(roole_cluster STATIC
 target_link_libraries(roole_cluster roole_core)
 
 # ============================================================================
-# ROUTER LIBRARY
+# ROUTER LIBRARY (LEGACY - use roole_node for new code)
 # ============================================================================
 add_library(roole_router STATIC
     src/router/router_core.c
@@ -50,10 +65,10 @@ add_library(roole_router STATIC
     src/router/message_handler.c
     src/router/rpc_handler.c
 )
-target_link_libraries(roole_router roole_core roole_dag roole_cluster)
+target_link_libraries(roole_router roole_core roole_dag roole_cluster roole_node)
 
 # ============================================================================
-# WORKER LIBRARY (removed worker_metrics.c dependency)
+# WORKER LIBRARY (LEGACY - use roole_node for new code)
 # ============================================================================
 add_library(roole_worker STATIC
     src/worker/worker_core.c
@@ -61,11 +76,14 @@ add_library(roole_worker STATIC
     src/worker/message_handler.c
     src/worker/rpc_handler.c
 )
-target_link_libraries(roole_worker roole_core roole_dag roole_cluster pthread m)
+target_link_libraries(roole_worker roole_core roole_dag roole_cluster roole_node pthread m)
 
 # ============================================================================
 # EXECUTABLES
 # ============================================================================
+# Unified Node binary
+add_executable(node test/node.c)
+target_link_libraries(node roole_node roole_router roole_worker)
 
 # Router binary
 add_executable(router test/router.c)
@@ -79,10 +97,12 @@ target_link_libraries(worker roole_worker)
 add_executable(client test/client.c)
 target_link_libraries(client roole_core)
 
+
+
 # ============================================================================
 # INSTALL TARGETS
 # ============================================================================
-install(TARGETS router worker client
+install(TARGETS router worker client node
     RUNTIME DESTINATION bin
 )
 

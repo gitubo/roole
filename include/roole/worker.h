@@ -11,56 +11,11 @@
 #include "roole/metrics.h"
 #include "roole/metrics_server.h"
 #include "roole/gossip.h"
+#include "roole/node.h"  // KEEP THIS
 #include <pthread.h>
 
 // ============================================================================
-// TASK QUEUE (Worker-side execution queue)
-// ============================================================================
-
-#define MAX_WORKER_QUEUE_SIZE 1000
-#define MAX_MESSAGE_SIZE 4096
-
-// Forward declaration (defined in router.h)
-typedef enum {
-    EXEC_STATUS_PENDING = 0,
-    EXEC_STATUS_RUNNING = 1,
-    EXEC_STATUS_COMPLETED = 2,
-    EXEC_STATUS_FAILED = 3,
-    EXEC_STATUS_RETRYING = 4,
-    EXEC_STATUS_TIMEOUT = 5
-} execution_status_t;
-
-typedef struct message {
-    execution_id_t exec_id;
-    rule_id_t dag_id;
-    uint8_t message_data[MAX_MESSAGE_SIZE];
-    size_t message_len;
-    uint64_t received_at_ms;
-    node_id_t sender_id;
-} message_t;
-
-typedef struct message_queue {
-    message_t *messages;
-    size_t head;
-    size_t tail;
-    size_t capacity;
-    size_t count;
-    pthread_mutex_t lock;
-    pthread_cond_t not_empty;
-    pthread_cond_t not_full;
-} message_queue_t; 
-
-int message_queue_init(message_queue_t *queue, size_t capacity);
-void message_queue_destroy(message_queue_t *queue);
-
-int message_queue_push(message_queue_t *queue, const message_t *message);
-int message_queue_pop(message_queue_t *queue, message_t *out_message, int timeout_ms);
-
-size_t message_queue_size(message_queue_t *queue);
-int message_queue_is_empty(message_queue_t *queue);
-
-// ============================================================================
-// ROUTER CONNECTION (Worker maintains connections to routers)
+// ROUTER CONNECTION (Legacy)
 // ============================================================================
 
 #define MAX_ROUTER_CONNECTIONS 16
@@ -79,7 +34,7 @@ typedef struct router_connection {
 } router_connection_t;
 
 // ============================================================================
-// WORKER STATE
+// LEGACY WORKER STATE (For backward compatibility)
 // ============================================================================
 
 typedef struct worker_state {
@@ -95,18 +50,15 @@ typedef struct worker_state {
     message_queue_t message_queue;
     uint32_t active_executions;
     
-    // NEW: Dependency-free metrics
     metrics_registry_t *metrics_registry;
     metrics_server_t *metrics_server;
     
-    // Metric handles (for quick access)
     metrics_t *metric_messages_processed;
     metrics_t *metric_messages_failed;
     metrics_t *metric_queue_size;
     metrics_t *metric_active_executions;
     metrics_t *metric_uptime_seconds;
     
-    // Cluster metrics
     metrics_t *metric_cluster_members_total;
     metrics_t *metric_cluster_members_active;
     metrics_t *metric_cluster_members_suspect;
@@ -122,14 +74,14 @@ typedef struct worker_state {
     membership_handle_t *membership;
     gossip_engine_t *gossip_engine;
     
-    pthread_t executor_threads[16];
+    pthread_t executor_threads[16];  // FIX: Fixed size array, not pointer
     size_t num_executor_threads;
     
     int shutdown_flag;
 } worker_state_t;
 
 // ============================================================================
-// WORKER API
+// WORKER API (Legacy - For backward compatibility)
 // ============================================================================
 
 int worker_init(worker_state_t *worker, node_id_t worker_id,
@@ -160,16 +112,10 @@ int worker_register_with_router(worker_state_t *worker, const char *router_ip,
 
 int worker_sync_catalog_from_router(worker_state_t *worker, node_id_t router_id);
 
-void* worker_executor_thread_fn(void *arg);
-
-// ============================================================================
-// METRICS HELPERS
-// ============================================================================
-
 void worker_update_cluster_metrics(worker_state_t *worker);
 
 // ============================================================================
-// RPC HANDLERS
+// RPC HANDLERS (Legacy)
 // ============================================================================
 
 void worker_set_rpc_state(worker_state_t *worker);

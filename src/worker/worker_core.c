@@ -39,7 +39,7 @@ static void on_member_event(node_id_t node_id, node_type_t type,
 // ============================================================================
 // EXECUTOR THREAD
 // ============================================================================
-
+/*
 void* worker_executor_thread_fn(void *arg) {
     worker_state_t *worker = (worker_state_t*)arg;
     
@@ -148,6 +148,7 @@ void* worker_executor_thread_fn(void *arg) {
     LOG_INFO("Worker executor thread stopped");
     return NULL;
 }
+*/
 
 // ============================================================================
 // WORKER INITIALIZATION
@@ -171,8 +172,28 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     worker->catalog_version = 0;
     worker->start_time_ms = time_now_ms();
     safe_strncpy(worker->cluster_name, cluster_name, MAX_CONFIG_STRING);
-    
     safe_strncpy(worker->bind_addr, bind_addr ? bind_addr : "0.0.0.0", MAX_IP_LEN);
+
+    // Detect capabilities from config
+    roole_config_t temp_config;
+    memset(&temp_config, 0, sizeof(temp_config));
+    safe_strncpy(temp_config.cluster_name, cluster_name, MAX_CONFIG_STRING);
+    
+    // Workers typically don't have ingress_addr configured
+    temp_config.ports.ingress_addr[0] = '\0';
+    
+    // Create temp unified node for capability detection
+    unified_node_t temp_node;
+    temp_node.node_id = worker_id;
+    safe_strncpy(temp_node.cluster_name, cluster_name, MAX_CONFIG_STRING);
+    
+    node_detect_capabilities(&temp_node, &temp_config);
+    
+    LOG_INFO("Worker capabilities detected:");
+    LOG_INFO("  has_ingress: %d (workers typically don't have ingress)", 
+             temp_node.capabilities.has_ingress);
+    LOG_INFO("  can_execute: %d", temp_node.capabilities.can_execute);
+    LOG_INFO("  can_route: %d", temp_node.capabilities.can_route);
     
     // Initialize DAG catalog
     if (dag_catalog_init(&worker->dag_catalog, MAX_DAGS) != RESULT_OK) {
@@ -181,7 +202,7 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     }
     
     // Initialize message queue
-    if (message_queue_init(&worker->message_queue, MAX_WORKER_QUEUE_SIZE) != RESULT_OK) {
+    if (message_queue_init(&worker->message_queue, MAX_NODE_QUEUE_SIZE) != RESULT_OK) {
         LOG_ERROR("Failed to initialize message queue");
         dag_catalog_destroy(&worker->dag_catalog);
         return RESULT_ERR_INVALID;
@@ -219,120 +240,31 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     worker->gossip_engine = ((struct membership_handle*)worker->membership)->gossip_engine;
 
     // Initialize metrics system if metrics_addr provided
+    worker->start_time_ms = time_now_ms();
+    
     if (metrics_addr && strlen(metrics_addr) > 0) {
-        char metrics_ip[16];
-        uint16_t metrics_port;
-        config_parse_address(metrics_addr, metrics_ip, &metrics_port);
+        // Use unified metrics system (temporary bridge until full migration)
+        unified_node_t temp_node;
+        temp_node.node_id = worker->worker_id;
+        safe_strncpy(temp_node.cluster_name, worker->cluster_name, MAX_CONFIG_STRING);
+        temp_node.start_time_ms = worker->start_time_ms;
+        temp_node.cluster_view = worker->cluster_view;
         
-        LOG_INFO("Metrics configuration: addr='%s', parsed ip='%s', port=%u", 
-                 metrics_addr, metrics_ip, metrics_port);
-        
-        if (metrics_port > 0) {
-            LOG_INFO("Initializing metrics system...");
-            
-            worker->metrics_registry = metrics_registry_init();
-            if (!worker->metrics_registry) {
-                LOG_WARN("Failed to initialize metrics registry - continuing without metrics");
-            } else {
-                LOG_INFO("Metrics registry initialized successfully");
-                
-                // Create metric label for worker_id
-                char worker_id_str[32];
-                snprintf(worker_id_str, sizeof(worker_id_str), "%u", worker_id);
-                
-                size_t NUMBER_OF_LABELS = 3;
-                metric_label_t labels[NUMBER_OF_LABELS];
-                safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[0].value, worker_id_str, MAX_LABEL_VALUE_LEN);
-                safe_strncpy(labels[1].name, "node_type", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[1].value, "worker", MAX_LABEL_VALUE_LEN);
-                safe_strncpy(labels[2].name, "cluster_name", MAX_LABEL_NAME_LEN);
-                safe_strncpy(labels[2].value, worker->cluster_name, MAX_LABEL_VALUE_LEN);
-                
-                LOG_DEBUG("Creating worker metrics with label worker_id=%s", worker_id_str);
-                
-                // Create counter metrics
-                worker->metric_messages_processed = metrics_get_or_create_counter(
-                    worker->metrics_registry,
-                    "messages_processed_total",
-                    "Total number of messages successfully processed",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                worker->metric_messages_failed = metrics_get_or_create_counter(
-                    worker->metrics_registry,
-                    "messages_failed_total",
-                    "Total number of messages that failed processing",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                // Create gauge metrics
-                worker->metric_queue_size = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "messages_queue_size",
-                    "Current number of messages in worker queue",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                worker->metric_uptime_seconds = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "uptime_seconds",
-                    "Worker uptime in seconds",
-                    NUMBER_OF_LABELS, labels
-                );
-
-                // Cluster metrics (add these - they were missing!)
-                worker->metric_cluster_members_total = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "cluster_members_total",
-                    "Total number of cluster members known to this node",
-                    NUMBER_OF_LABELS, labels
-                );
-
-                worker->metric_cluster_members_active = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "cluster_members_active",
-                    "Number of active cluster members",
-                    NUMBER_OF_LABELS, labels
-                );
-
-                worker->metric_cluster_members_suspect = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "cluster_members_suspect",
-                    "Number of suspected cluster members",
-                    NUMBER_OF_LABELS, labels
-                );
-
-                worker->metric_cluster_members_dead = metrics_get_or_create_gauge(
-                    worker->metrics_registry,
-                    "cluster_members_dead",
-                    "Number of dead cluster members",
-                    NUMBER_OF_LABELS, labels
-                );
-                
-                LOG_INFO("Metrics created successfully, starting HTTP server...");
-                
-                // Start metrics HTTP server
-                worker->metrics_server = metrics_server_start(
-                    worker->metrics_registry,
-                    metrics_ip,
-                    metrics_port
-                );
-                
-                if (!worker->metrics_server) {
-                    LOG_ERROR("Failed to start metrics HTTP server on %s:%u", 
-                            metrics_ip, metrics_port);
-                    LOG_WARN("Continuing without metrics endpoint");
-                } else {
-                    LOG_INFO("Metrics HTTP server started successfully on http://%s:%u/metrics", 
-                            metrics_ip, metrics_port);
-                }
-            }
-        } else {
-            LOG_WARN("Metrics disabled: invalid port=%u in config", metrics_port);
+        if (node_metrics_init(&temp_node, metrics_addr) == RESULT_OK) {
+            // Copy metrics handles back to worker
+            worker->metrics_registry = temp_node.metrics_registry;
+            worker->metrics_server = temp_node.metrics_server;
+            worker->metric_messages_processed = temp_node.metric_messages_processed;
+            worker->metric_messages_failed = temp_node.metric_messages_failed;
+            worker->metric_queue_size = temp_node.metric_queue_size;
+            worker->metric_uptime_seconds = temp_node.metric_uptime_seconds;
+            worker->metric_cluster_members_total = temp_node.metric_cluster_members_total;
+            worker->metric_cluster_members_active = temp_node.metric_cluster_members_active;
+            worker->metric_cluster_members_suspect = temp_node.metric_cluster_members_suspect;
+            worker->metric_cluster_members_dead = temp_node.metric_cluster_members_dead;
         }
     } else {
-        LOG_INFO("Metrics disabled: no metrics_addr configured");
+        LOG_INFO("Metrics disabled for worker");
         worker->metrics_registry = NULL;
         worker->metrics_server = NULL;
     }
@@ -346,6 +278,7 @@ int worker_start(worker_state_t *worker) {
     if (!worker) return RESULT_ERR_INVALID;
     
     // Start executor threads
+    /*
     for (size_t i = 0; i < worker->num_executor_threads; i++) {
         if (pthread_create(&worker->executor_threads[i], NULL, 
                           worker_executor_thread_fn, worker) != 0) {
@@ -359,6 +292,39 @@ int worker_start(worker_state_t *worker) {
             return RESULT_ERR_INVALID;
         }
     }
+    */
+
+    // Start executor threads using unified executor
+    unified_node_t temp_node;
+    temp_node.node_id = worker->worker_id;
+    temp_node.shutdown_flag = 0;
+    temp_node.active_executions = 0;
+    temp_node.num_executor_threads = worker->num_executor_threads;
+    temp_node.message_queue = worker->message_queue;
+    temp_node.dag_catalog = worker->dag_catalog;
+    temp_node.peer_pool.peers = NULL;  // Not needed for execution
+    temp_node.capabilities.can_execute = 1;
+    
+    // Copy metrics handles
+    temp_node.metric_messages_processed = worker->metric_messages_processed;
+    temp_node.metric_messages_failed = worker->metric_messages_failed;
+    temp_node.metric_queue_size = worker->metric_queue_size;
+    temp_node.metric_active_executions = worker->metric_active_executions;
+    
+    if (node_start_executors(&temp_node) != RESULT_OK) {
+        LOG_ERROR("Failed to start executor threads");
+        return RESULT_ERR_INVALID;
+    }
+    
+    // Copy back thread handles for cleanup
+    worker->num_executor_threads = temp_node.num_executor_threads;
+    // Copy thread handles (array to array)
+    for (size_t i = 0; i < worker->num_executor_threads && i < 16; i++) {
+        worker->executor_threads[i] = temp_node.executor_threads[i];
+    }
+
+    free(temp_node.executor_threads);
+    temp_node.executor_threads = NULL;
     
     LOG_INFO("Worker %u started (%zu executor threads)", 
              worker->worker_id, worker->num_executor_threads);
@@ -370,31 +336,66 @@ void worker_shutdown(worker_state_t *worker) {
     
     LOG_INFO("Shutting down worker %u", worker->worker_id);
     
+    // Set shutdown flag
     worker->shutdown_flag = 1;
     
-    // Wait for executor threads to complete
-    for (size_t i = 0; i < worker->num_executor_threads; i++) {
-        pthread_join(worker->executor_threads[i], NULL);
+    // Wait for executor threads to complete using unified shutdown
+    if (worker->num_executor_threads > 0) {
+        LOG_INFO("Stopping %zu executor threads...", worker->num_executor_threads);
+        
+        unified_node_t temp_node;
+        temp_node.shutdown_flag = 1;
+        temp_node.num_executor_threads = worker->num_executor_threads;
+        temp_node.executor_threads = worker->executor_threads;  // Direct array assignment OK
+        
+        node_stop_executors(&temp_node);
+        
+        // Clear thread count (array itself is part of struct, not freed)
+        worker->num_executor_threads = 0;
+        
+        LOG_INFO("Executor threads stopped");
     }
     
     // Shutdown membership (gossip protocol)
     if (worker->membership) {
+        LOG_INFO("Shutting down membership/gossip...");
         membership_shutdown(worker->membership);
+        worker->membership = NULL;
     }
     
     // Shutdown metrics system
     if (worker->metrics_server) {
+        LOG_INFO("Shutting down metrics server...");
         metrics_server_shutdown(worker->metrics_server);
         worker->metrics_server = NULL;
     }
     
     if (worker->metrics_registry) {
+        LOG_INFO("Destroying metrics registry...");
         metrics_registry_destroy(worker->metrics_registry);
         worker->metrics_registry = NULL;
     }
     
-    // Cleanup resources
+    // Cleanup router connections
+    LOG_INFO("Cleaning up router connections...");
+    pthread_mutex_lock(&worker->routers_lock);
+    
+    for (size_t i = 0; i < MAX_ROUTER_CONNECTIONS; i++) {
+        if (worker->routers[i].active) {
+            if (worker->routers[i].data_channel) {
+                rpc_channel_destroy(worker->routers[i].data_channel);
+                safe_free(worker->routers[i].data_channel);
+                worker->routers[i].data_channel = NULL;
+            }
+            worker->routers[i].active = 0;
+        }
+    }
+    
+    pthread_mutex_unlock(&worker->routers_lock);
     pthread_mutex_destroy(&worker->routers_lock);
+    
+    // Cleanup resources
+    LOG_INFO("Destroying worker resources...");
     cluster_view_destroy(&worker->cluster_view);
     message_queue_destroy(&worker->message_queue);
     dag_catalog_destroy(&worker->dag_catalog);
@@ -426,7 +427,7 @@ int worker_enqueue_message(worker_state_t *worker, execution_id_t exec_id,
 // ============================================================================
 // WORKER BOOTSTRAP FROM CONFIG
 // ============================================================================
-
+/*
 int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *config) {
     if (!worker || !config || config->router_count == 0) {
         LOG_ERROR("Invalid bootstrap configuration");
@@ -591,7 +592,7 @@ int worker_bootstrap_from_config(worker_state_t *worker, const roole_config_t *c
     LOG_INFO("Worker bootstrap completed successfully");
     return RESULT_OK;
 }
-
+*/
 // ============================================================================
 // ROUTER MANAGEMENT
 // ============================================================================
@@ -692,4 +693,18 @@ int worker_remove_router(worker_state_t *worker, node_id_t router_id) {
     pthread_mutex_unlock(&worker->routers_lock);
     LOG_WARN("Router %u not found (cannot remove)", router_id);
     return RESULT_ERR_NOTFOUND;
+}
+
+void worker_update_cluster_metrics(worker_state_t *worker) {
+    if (!worker) return;
+    
+    // Bridge to unified metrics (temporary)
+    unified_node_t temp_node;
+    temp_node.cluster_view = worker->cluster_view;
+    temp_node.metric_cluster_members_total = worker->metric_cluster_members_total;
+    temp_node.metric_cluster_members_active = worker->metric_cluster_members_active;
+    temp_node.metric_cluster_members_suspect = worker->metric_cluster_members_suspect;
+    temp_node.metric_cluster_members_dead = worker->metric_cluster_members_dead;
+    
+    node_metrics_update_cluster(&temp_node);
 }

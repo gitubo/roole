@@ -79,7 +79,7 @@ execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag
     
     rec->exec_id = exec_id;
     rec->dag_id = dag_id;
-    rec->assigned_worker = worker_id;
+    rec->assigned_peer = worker_id;
     rec->status = EXEC_STATUS_PENDING;
     rec->submit_time_ms = time_now_ms();
     rec->retry_count = 0;
@@ -162,7 +162,7 @@ size_t execution_tracker_get_by_worker(execution_tracker_t *tracker, node_id_t w
     size_t found = 0;
     for (size_t i = 0; i < tracker->capacity && found < max_count; i++) {
         if (tracker->records[i].active && 
-            tracker->records[i].assigned_worker == worker_id &&
+            tracker->records[i].assigned_peer  == worker_id &&
             tracker->records[i].status != EXEC_STATUS_COMPLETED &&
             tracker->records[i].status != EXEC_STATUS_FAILED) {
             out_exec_ids[found++] = tracker->records[i].exec_id;

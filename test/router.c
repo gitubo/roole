@@ -24,9 +24,31 @@ static void signal_handler(int sig) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <config_file.ini>\n", argv[0]);
-        fprintf(stderr, "Example: %s config/router.ini\n", argv[0]);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "NOTE: This is the LEGACY router binary.\n");
+        fprintf(stderr, "Consider using the unified 'node' binary instead:\n");
+        fprintf(stderr, "  ./node config/router.ini\n");
+        fprintf(stderr, "\n");
         return 1;
     }
+
+    LOG_WARN("========================================");
+    LOG_WARN("LEGACY BINARY NOTICE");
+    LOG_WARN("========================================");
+    LOG_WARN("You are using the legacy 'router' binary.");
+    LOG_WARN("This binary will be deprecated in a future release.");
+    LOG_WARN("");
+    LOG_WARN("Migration: Use the unified 'node' binary instead:");
+    LOG_WARN("  ./node %s", argv[1]);
+    LOG_WARN("");
+    LOG_WARN("The unified binary supports:");
+    LOG_WARN("  - Same configuration files");
+    LOG_WARN("  - Automatic capability detection");
+    LOG_WARN("  - Hybrid node deployment");
+    LOG_WARN("========================================");
+    LOG_WARN("");
+    
+    sleep(2);  // Give user time to read notice
 
     // Load configuration from INI file
     roole_config_t config;
@@ -148,37 +170,28 @@ int main(int argc, char **argv) {
         LOG_WARN("Failed to add test DAG (may already exist)");
     }
     
-    // Bootstrap: join cluster via gossip if seed routers are configured
+    // Bootstrap using unified bootstrap
     if (config.router_count > 0) {
         LOG_INFO("Joining cluster via seed routers...");
         
-        int seeds_added = 0;
-        for (size_t i = 0; i < config.router_count; i++) {
-            char seed_ip[16];
-            uint16_t seed_gossip_port;
-            config_parse_address(config.routers[i], seed_ip, &seed_gossip_port);
-            
-            if (seed_gossip_port == 0) {
-                LOG_WARN("Invalid seed router address: %s", config.routers[i]);
-                continue;
-            }
-            
-            if (gossip_engine_add_seed(g_router.gossip_engine, seed_ip, seed_gossip_port) == 0) {
-                LOG_INFO("Added seed router: %s", config.routers[i]);
-                seeds_added++;
-            } else {
-                LOG_WARN("Failed to add seed router: %s", config.routers[i]);
-            }
-        }
+        // Create temporary unified node for bootstrap
+        unified_node_t temp_node;
+        temp_node.node_id = g_router.router_id;
+        safe_strncpy(temp_node.bind_addr, g_router.bind_addr, MAX_IP_LEN);
+        temp_node.gossip_port = g_router.gossip_port;
+        temp_node.data_port = g_router.data_port;
+        temp_node.peer_pool = g_router.worker_pool;  // Map to peer pool
+        temp_node.gossip_engine = g_router.gossip_engine;
         
-        if (seeds_added > 0) {
-            gossip_engine_announce_join(g_router.gossip_engine);
-            LOG_INFO("Cluster join announced (%d seeds contacted)", seeds_added);
+        int bootstrap_result = node_bootstrap_with_retry(&temp_node, &config, 3);
+        
+        if (bootstrap_result == RESULT_OK) {
+            LOG_INFO("Router bootstrap completed successfully");
         } else {
-            LOG_WARN("No seed routers could be contacted, running standalone");
+            LOG_WARN("Bootstrap incomplete, running as seed/standalone");
         }
     } else {
-        LOG_INFO("No seed routers configured, running as standalone cluster");
+        LOG_INFO("No seed routers configured, running as seed node");
         gossip_engine_announce_join(g_router.gossip_engine);
     }
     
@@ -189,10 +202,34 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    // Create unified node wrapper for capability testing
+    unified_node_t test_node;
+    memset(&test_node, 0, sizeof(unified_node_t));
+    
+    test_node.node_id = config.node_id;
+    safe_strncpy(test_node.cluster_name, config.cluster_name, MAX_CONFIG_STRING);
+    
+    // Detect capabilities
+    node_detect_capabilities(&test_node, &config);
+    node_print_capabilities(&test_node);
+    
+    // Verify ingress is enabled for routers
+    if (!test_node.capabilities.has_ingress) {
+        LOG_WARN("Router should have ingress capability!");
+        LOG_WARN("Check that ingress_addr is properly configured in %s", argv[1]);
+    }
+    
+    LOG_INFO("");
+    LOG_INFO("Capability Explanation:");
+    LOG_INFO("  - INGRESS: Accepts client requests (port %u)", ingress_port);
+    LOG_INFO("  - EXECUTE: Processes messages locally (currently disabled for routers)");
+    LOG_INFO("  - ROUTE: Forwards messages to worker nodes");
+    LOG_INFO("");
+
     LOG_INFO("Router background threads started");
     
     // Set RPC state and start RPC servers (blocking)
-    router_set_rpc_state(&g_router);
+    //router_set_rpc_state(&g_router);
 
     LOG_INFO("========================================");
     LOG_INFO("Router is now running");
