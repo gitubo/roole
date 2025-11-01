@@ -81,7 +81,6 @@ int main(int argc, char **argv) {
     LOG_INFO("Cluster: %s", config.cluster_name);
     LOG_INFO("Threads: %zu", num_threads);
     LOG_INFO("========================================");
-    LOG_INFO("");
 
     // Initialize node
     if (node_init(&g_node, &config, num_threads) != RESULT_OK) {
@@ -146,7 +145,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    LOG_INFO("");
     LOG_INFO("========================================");
     LOG_INFO("Node Running");
     LOG_INFO("  ID: %u", g_node.node_id);
@@ -165,7 +163,6 @@ int main(int argc, char **argv) {
     
     LOG_INFO("========================================");
     LOG_INFO("Press Ctrl+C to stop");
-    LOG_INFO("");
 
     // Start RPC servers in background thread
     if (pthread_create(&g_rpc_thread, NULL, rpc_server_thread_fn, service_table) != 0) {
@@ -185,7 +182,6 @@ int main(int argc, char **argv) {
     }
 
     // Shutdown
-    LOG_INFO("");
     LOG_INFO("Shutting down...");
     
     node_free_rpc_service_table(service_table);

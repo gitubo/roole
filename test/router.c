@@ -8,9 +8,41 @@
 #include <signal.h>
 #include <string.h>
 #include <unistd.h>
-#include "roole/router.h"
+#include "roole/node.h"
 #include "roole/config.h"
 #include "roole/common.h"
+
+typedef struct router_state {
+    node_id_t router_id;
+    char cluster_name[256];
+    uint16_t gossip_port;
+    uint16_t data_port;
+    uint16_t ingress_port;
+    char bind_addr[16];
+    
+    // Reuse unified structures
+    dag_catalog_t dag_catalog;
+    peer_pool_t worker_pool;
+    execution_tracker_t exec_tracker;
+    cluster_view_t cluster_view;
+    membership_handle_t *membership;
+    void *gossip_engine;
+    
+    pthread_t cleanup_thread;
+    
+    void *metrics_registry;
+    void *metrics_server;
+    void *metric_messages_routed_total;
+    void *metric_messages_routed_failed;
+    void *metric_uptime_seconds;
+    void *metric_cluster_members_total;
+    void *metric_cluster_members_active;
+    void *metric_cluster_members_suspect;
+    void *metric_cluster_members_dead;
+    
+    uint64_t start_time_ms;
+    int shutdown_flag;
+} router_state_t;
 
 static router_state_t g_router;
 static volatile int g_shutdown_requested = 0;
@@ -37,16 +69,13 @@ int main(int argc, char **argv) {
     LOG_WARN("========================================");
     LOG_WARN("You are using the legacy 'router' binary.");
     LOG_WARN("This binary will be deprecated in a future release.");
-    LOG_WARN("");
     LOG_WARN("Migration: Use the unified 'node' binary instead:");
     LOG_WARN("  ./node %s", argv[1]);
-    LOG_WARN("");
     LOG_WARN("The unified binary supports:");
     LOG_WARN("  - Same configuration files");
     LOG_WARN("  - Automatic capability detection");
     LOG_WARN("  - Hybrid node deployment");
     LOG_WARN("========================================");
-    LOG_WARN("");
     
     sleep(2);  // Give user time to read notice
 
@@ -219,12 +248,10 @@ int main(int argc, char **argv) {
         LOG_WARN("Check that ingress_addr is properly configured in %s", argv[1]);
     }
     
-    LOG_INFO("");
     LOG_INFO("Capability Explanation:");
     LOG_INFO("  - INGRESS: Accepts client requests (port %u)", ingress_port);
     LOG_INFO("  - EXECUTE: Processes messages locally (currently disabled for routers)");
     LOG_INFO("  - ROUTE: Forwards messages to worker nodes");
-    LOG_INFO("");
 
     LOG_INFO("Router background threads started");
     
@@ -241,7 +268,6 @@ int main(int argc, char **argv) {
     }
     LOG_INFO("========================================");
     LOG_INFO("Press Ctrl+C to stop");
-    LOG_INFO("");
 
     // Start RPC servers in a separate thread so we can update metrics
     int rpc_result = rpc_router_run(data_port, ingress_port, router_rpc_service_table);

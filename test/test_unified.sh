@@ -5,76 +5,150 @@
 set -e
 
 echo "=========================================="
-echo "Roole Unified Node Test"
+echo "Roole Unified Node Cluster Test"
 echo "=========================================="
 echo ""
 
-# Cleanup
+# Cleanup old processes
 echo "Cleaning up old processes..."
 pkill -9 node router worker 2>/dev/null || true
 sleep 1
 
-# Create test directories
+# Create log directory
 mkdir -p logs
 
-echo "Starting test cluster with unified nodes..."
+# Function to wait for node to be ready
+wait_for_node() {
+    local port=$1
+    local max_attempts=10
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s http://localhost:$port/metrics > /dev/null 2>&1; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+
+echo "Starting 3-node cluster (1 ingress + 2 compute)..."
 echo ""
 
-# Start seed node (ingress-capable)
-echo "1. Starting SEED NODE (ingress + execution)..."
-./node config/router.ini > logs/seed_node.log 2>&1 &
-SEED_PID=$!
-echo "   PID: $SEED_PID"
-sleep 2
+# Start ingress node (seed)
+echo "[1/3] Starting INGRESS NODE (client-facing)..."
+./node config/router.ini > logs/ingress_node.log 2>&1 &
+INGRESS_PID=$!
+echo "      PID: $INGRESS_PID"
+
+if wait_for_node 7002; then
+    echo "      ✓ Ingress node ready (metrics on :7002)"
+else
+    echo "      ✗ Ingress node failed to start"
+    kill $INGRESS_PID 2>/dev/null
+    exit 1
+fi
 
 # Start compute node 1
-echo "2. Starting COMPUTE NODE 100 (execution only)..."
+echo "[2/3] Starting COMPUTE NODE 100..."
 ./node config/worker_100.ini 4 > logs/compute_100.log 2>&1 &
 COMPUTE1_PID=$!
-echo "   PID: $COMPUTE1_PID"
-sleep 2
+echo "      PID: $COMPUTE1_PID"
+
+if wait_for_node 7102; then
+    echo "      ✓ Compute node 100 ready (metrics on :7102)"
+else
+    echo "      ✗ Compute node 100 failed to start"
+    kill $INGRESS_PID $COMPUTE1_PID 2>/dev/null
+    exit 1
+fi
 
 # Start compute node 2
-echo "3. Starting COMPUTE NODE 200 (execution only)..."
+echo "[3/3] Starting COMPUTE NODE 200..."
 ./node config/worker_200.ini 4 > logs/compute_200.log 2>&1 &
 COMPUTE2_PID=$!
-echo "   PID: $COMPUTE2_PID"
-sleep 2
+echo "      PID: $COMPUTE2_PID"
 
-# Start hybrid node (if config exists)
-if [ -f config/hybrid_node.ini ]; then
-    echo "4. Starting HYBRID NODE (ingress + execution)..."
-    ./node config/hybrid_node.ini 2 > logs/hybrid_node.log 2>&1 &
-    HYBRID_PID=$!
-    echo "   PID: $HYBRID_PID"
-    sleep 2
+if wait_for_node 7202; then
+    echo "      ✓ Compute node 200 ready (metrics on :7202)"
+else
+    echo "      ✗ Compute node 200 failed to start"
+    kill $INGRESS_PID $COMPUTE1_PID $COMPUTE2_PID 2>/dev/null
+    exit 1
 fi
 
 echo ""
 echo "=========================================="
-echo "Cluster Started"
+echo "Cluster Status"
 echo "=========================================="
-echo "Seed Node:     PID $SEED_PID (ingress on 8081)"
-echo "Compute 100:   PID $COMPUTE1_PID"
-echo "Compute 200:   PID $COMPUTE2_PID"
-if [ ! -z "$HYBRID_PID" ]; then
-    echo "Hybrid Node:   PID $HYBRID_PID (ingress on 8082)"
-fi
+echo "✓ Ingress Node:  PID $INGRESS_PID"
+echo "  - Client API:  http://localhost:8081"
+echo "  - Metrics:     http://localhost:7002/metrics"
+echo ""
+echo "✓ Compute 100:   PID $COMPUTE1_PID"
+echo "  - Metrics:     http://localhost:7102/metrics"
+echo ""
+echo "✓ Compute 200:   PID $COMPUTE2_PID"
+echo "  - Metrics:     http://localhost:7202/metrics"
 echo ""
 echo "Logs: logs/*.log"
 echo "=========================================="
 echo ""
 
+# Wait for cluster to stabilize
+echo "Waiting for cluster to stabilize (5s)..."
+sleep 5
+
 # Send test message
-sleep 3
-echo "Sending test message..."
-./client 127.0.0.1 8081 "Hello Unified Cluster"
+echo "Sending test message to cluster..."
+./client 127.0.0.1 8081 "Hello Unified Cluster" || {
+    echo "✗ Test message failed"
+    kill $INGRESS_PID $COMPUTE1_PID $COMPUTE2_PID 2>/dev/null
+    exit 1
+}
 
 echo ""
-echo "Cluster running. Press Ctrl+C to stop."
+echo "✓ Test message sent successfully"
+echo ""
+echo "=========================================="
+echo "Cluster Running Successfully"
+echo "=========================================="
+echo ""
+echo "Available commands:"
+echo "  - Send message:    ./client 127.0.0.1 8081 'Your message'"
+echo "  - View metrics:    curl http://localhost:7002/metrics"
+echo "  - View logs:       tail -f logs/ingress_node.log"
+echo "  - Stop cluster:    kill $INGRESS_PID $COMPUTE1_PID $COMPUTE2_PID"
+echo ""
+echo "Press Ctrl+C to stop all nodes and exit"
 echo ""
 
-# Wait for interrupt
-trap "echo ''; echo 'Stopping cluster...'; kill $SEED_PID $COMPUTE1_PID $COMPUTE2_PID $HYBRID_PID 2>/dev/null; exit 0" INT TERM
+# Trap to cleanup on exit
+cleanup() {
+    echo ""
+    echo "Stopping cluster..."
+    kill $INGRESS_PID $COMPUTE1_PID $COMPUTE2_PID 2>/dev/null
+    echo "Cluster stopped"
+    exit 0
+}
 
-wait
+trap cleanup INT TERM
+
+# Keep script running
+while true; do
+    sleep 1
+    # Check if nodes are still alive
+    if ! kill -0 $INGRESS_PID 2>/dev/null; then
+        echo "ERROR: Ingress node crashed"
+        cleanup
+    fi
+    if ! kill -0 $COMPUTE1_PID 2>/dev/null; then
+        echo "ERROR: Compute node 100 crashed"
+        cleanup
+    fi
+    if ! kill -0 $COMPUTE2_PID 2>/dev/null; then
+        echo "ERROR: Compute node 200 crashed"
+        cleanup
+    fi
+done

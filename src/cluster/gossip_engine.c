@@ -618,15 +618,13 @@ static void handle_dead_message(gossip_engine_t *engine,
         int should_update = (existing != NULL);
         node_type_t node_type = NODE_TYPE_UNKNOWN;
         char ip[MAX_IP_LEN] = {0};
-        uint16_t gossip_port = 0;
-        uint16_t data_port = 0;
+        uint16_t data_port = 0;  // Only use data_port (gossip_port removed)
         
         if (existing) {
             node_type = existing->node_type;
             safe_strncpy(ip, existing->ip_address, MAX_IP_LEN);
-            gossip_port = existing->gossip_port;
             data_port = existing->data_port;
-            cluster_view_release(engine->cluster_view);  // Release!
+            cluster_view_release(engine->cluster_view);
         }
         
         if (should_update) {
@@ -637,7 +635,8 @@ static void handle_dead_message(gossip_engine_t *engine,
             
             if (engine->event_callback) {
                 engine->event_callback(upd->node_id, node_type, ip, data_port,
-                                     MEMBER_EVENT_LEAVE, engine->event_callback_data);
+                                     MEMBER_EVENT_LEAVE, 
+                                     engine->event_callback_data);
             }
         }
     }

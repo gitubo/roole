@@ -3,7 +3,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "roole/worker.h"
+#include "roole/node.h"
 #include "roole/config.h"
 #include "roole/common.h"
 #include <stdio.h>
@@ -239,29 +239,111 @@ int worker_init(worker_state_t *worker, node_id_t worker_id,
     membership_set_callback(worker->membership, on_member_event, worker);
     worker->gossip_engine = ((struct membership_handle*)worker->membership)->gossip_engine;
 
-    // Initialize metrics system if metrics_addr provided
+// Initialize metrics system if metrics_addr provided
     worker->start_time_ms = time_now_ms();
     
     if (metrics_addr && strlen(metrics_addr) > 0) {
-        // Use unified metrics system (temporary bridge until full migration)
-        unified_node_t temp_node;
-        temp_node.node_id = worker->worker_id;
-        safe_strncpy(temp_node.cluster_name, worker->cluster_name, MAX_CONFIG_STRING);
-        temp_node.start_time_ms = worker->start_time_ms;
-        temp_node.cluster_view = worker->cluster_view;
+        // Parse metrics address
+        char metrics_ip[16];
+        uint16_t metrics_port;
+        config_parse_address(metrics_addr, metrics_ip, &metrics_port);
         
-        if (node_metrics_init(&temp_node, metrics_addr) == RESULT_OK) {
-            // Copy metrics handles back to worker
-            worker->metrics_registry = temp_node.metrics_registry;
-            worker->metrics_server = temp_node.metrics_server;
-            worker->metric_messages_processed = temp_node.metric_messages_processed;
-            worker->metric_messages_failed = temp_node.metric_messages_failed;
-            worker->metric_queue_size = temp_node.metric_queue_size;
-            worker->metric_uptime_seconds = temp_node.metric_uptime_seconds;
-            worker->metric_cluster_members_total = temp_node.metric_cluster_members_total;
-            worker->metric_cluster_members_active = temp_node.metric_cluster_members_active;
-            worker->metric_cluster_members_suspect = temp_node.metric_cluster_members_suspect;
-            worker->metric_cluster_members_dead = temp_node.metric_cluster_members_dead;
+        if (metrics_port > 0) {
+            // Initialize registry
+            worker->metrics_registry = metrics_registry_init();
+            if (!worker->metrics_registry) {
+                LOG_WARN("Failed to initialize metrics registry");
+            } else {
+                // Build standard labels (cluster_name, node_id, node_type)
+                char node_id_str[32];
+                snprintf(node_id_str, sizeof(node_id_str), "%u", worker->worker_id);
+                
+                metric_label_t labels[3];
+                safe_strncpy(labels[0].name, "cluster_name", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[0].value, worker->cluster_name, MAX_LABEL_VALUE_LEN);
+                
+                safe_strncpy(labels[1].name, "node_id", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[1].value, node_id_str, MAX_LABEL_VALUE_LEN);
+                
+                safe_strncpy(labels[2].name, "node_type", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[2].value, "worker", MAX_LABEL_VALUE_LEN);
+                
+                // Create metrics
+                worker->metric_messages_processed = metrics_get_or_create_counter(
+                    worker->metrics_registry,
+                    "messages_processed_total",
+                    "Total messages successfully processed",
+                    3, labels
+                );
+                
+                worker->metric_messages_failed = metrics_get_or_create_counter(
+                    worker->metrics_registry,
+                    "messages_failed_total",
+                    "Total messages that failed processing",
+                    3, labels
+                );
+                
+                worker->metric_queue_size = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "messages_queue_size",
+                    "Current queue depth",
+                    3, labels
+                );
+                
+                worker->metric_active_executions = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "active_executions",
+                    "Currently executing messages",
+                    3, labels
+                );
+                
+                worker->metric_uptime_seconds = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "uptime_seconds",
+                    "Worker uptime in seconds",
+                    3, labels
+                );
+                
+                worker->metric_cluster_members_total = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_total",
+                    "Total cluster members",
+                    3, labels
+                );
+                
+                worker->metric_cluster_members_active = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_active",
+                    "Active cluster members",
+                    3, labels
+                );
+                
+                worker->metric_cluster_members_suspect = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_suspect",
+                    "Suspected cluster members",
+                    3, labels
+                );
+                
+                worker->metric_cluster_members_dead = metrics_get_or_create_gauge(
+                    worker->metrics_registry,
+                    "cluster_members_dead",
+                    "Dead cluster members",
+                    3, labels
+                );
+                
+                // Start server
+                worker->metrics_server = metrics_server_start(
+                    worker->metrics_registry,
+                    metrics_ip,
+                    metrics_port
+                );
+                
+                if (worker->metrics_server) {
+                    LOG_INFO("Worker metrics at http://%s:%u/metrics", 
+                             metrics_ip, metrics_port);
+                }
+            }
         }
     } else {
         LOG_INFO("Metrics disabled for worker");

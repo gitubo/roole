@@ -2,7 +2,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "roole/router.h"
+#include "roole/node.h"
 #include "roole/common.h"
 #include "roole/config.h"
 #include <stdio.h>
@@ -134,30 +134,101 @@ int router_init(router_state_t *router, node_id_t router_id,
     router->gossip_engine = ((struct membership_handle*)router->membership)->gossip_engine;
 
     // ========================================================================
-    // METRICS INITIALIZATION
+    // METRICS INITIALIZATION (Standardized Labels)
     // ========================================================================
     
     router->start_time_ms = time_now_ms();
     
     if (metrics_addr && strlen(metrics_addr) > 0) {
-        // Use unified metrics system (temporary bridge until full migration)
-        unified_node_t temp_node;
-        temp_node.node_id = router->router_id;
-        safe_strncpy(temp_node.cluster_name, router->cluster_name, MAX_CONFIG_STRING);
-        temp_node.start_time_ms = router->start_time_ms;
-        temp_node.cluster_view = router->cluster_view;
+        // Parse metrics address
+        char metrics_ip[16];
+        uint16_t metrics_port;
+        config_parse_address(metrics_addr, metrics_ip, &metrics_port);
         
-        if (node_metrics_init(&temp_node, metrics_addr) == RESULT_OK) {
-            // Copy metrics handles back to router
-            router->metrics_registry = temp_node.metrics_registry;
-            router->metrics_server = temp_node.metrics_server;
-            router->metric_messages_routed_total = temp_node.metric_messages_routed;
-            router->metric_messages_routed_failed = temp_node.metric_messages_failed;
-            router->metric_uptime_seconds = temp_node.metric_uptime_seconds;
-            router->metric_cluster_members_total = temp_node.metric_cluster_members_total;
-            router->metric_cluster_members_active = temp_node.metric_cluster_members_active;
-            router->metric_cluster_members_suspect = temp_node.metric_cluster_members_suspect;
-            router->metric_cluster_members_dead = temp_node.metric_cluster_members_dead;
+        if (metrics_port > 0) {
+            // Initialize metrics registry
+            router->metrics_registry = metrics_registry_init();
+            if (!router->metrics_registry) {
+                LOG_WARN("Failed to initialize metrics registry");
+            } else {
+                // Build standard labels (cluster_name, node_id, node_type)
+                char node_id_str[32];
+                snprintf(node_id_str, sizeof(node_id_str), "%u", router->router_id);
+                
+                metric_label_t labels[3];
+                safe_strncpy(labels[0].name, "cluster_name", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[0].value, router->cluster_name, MAX_LABEL_VALUE_LEN);
+                
+                safe_strncpy(labels[1].name, "node_id", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[1].value, node_id_str, MAX_LABEL_VALUE_LEN);
+                
+                safe_strncpy(labels[2].name, "node_type", MAX_LABEL_NAME_LEN);
+                safe_strncpy(labels[2].value, "router", MAX_LABEL_VALUE_LEN);
+                
+                // Create metrics with standard labels
+                router->metric_messages_routed_total = metrics_get_or_create_counter(
+                    router->metrics_registry,
+                    "messages_routed_total",
+                    "Total number of messages routed to workers",
+                    3, labels
+                );
+                
+                router->metric_messages_routed_failed = metrics_get_or_create_counter(
+                    router->metrics_registry,
+                    "messages_routed_failed_total",
+                    "Total number of routing failures",
+                    3, labels
+                );
+                
+                router->metric_uptime_seconds = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "uptime_seconds",
+                    "Router uptime in seconds",
+                    3, labels
+                );
+                
+                router->metric_cluster_members_total = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_total",
+                    "Total number of cluster members",
+                    3, labels
+                );
+                
+                router->metric_cluster_members_active = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_active",
+                    "Number of active cluster members",
+                    3, labels
+                );
+                
+                router->metric_cluster_members_suspect = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_suspect",
+                    "Number of suspected cluster members",
+                    3, labels
+                );
+                
+                router->metric_cluster_members_dead = metrics_get_or_create_gauge(
+                    router->metrics_registry,
+                    "cluster_members_dead",
+                    "Number of dead cluster members",
+                    3, labels
+                );
+                
+                // Start metrics server
+                router->metrics_server = metrics_server_start(
+                    router->metrics_registry,
+                    metrics_ip,
+                    metrics_port
+                );
+                
+                if (router->metrics_server) {
+                    LOG_INFO("Router metrics available at http://%s:%u/metrics", 
+                             metrics_ip, metrics_port);
+                } else {
+                    LOG_WARN("Failed to start metrics server");
+                }
+            }
         }
     } else {
         LOG_INFO("Metrics disabled for router");

@@ -1,23 +1,66 @@
+# config/prometheus.yaml - Prometheus scrape configuration
 
 global:
   scrape_interval: 15s
-  
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'roole_production'
+    environment: 'prod'
+
 scrape_configs:
-  - job_name: 'router_1'
+  # Ingress nodes (router capability)
+  - job_name: 'roole_ingress'
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['roole:7002']
+      - targets:
+          - 'node1.example.com:7002'
+          - 'node2.example.com:7002'
         labels:
-          cluster: 'my_test_cluster'
-  - job_name: 'worker_100'
+          role: 'ingress'
+          capability: 'router'
+    
+    metric_relabel_configs:
+      # Only scrape from nodes with node_type="router"
+      - source_labels: [node_type]
+        regex: 'router'
+        action: keep
+
+  # Compute nodes (worker capability)
+  - job_name: 'roole_compute'
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['roole:7102']
+      - targets:
+          - 'node100.example.com:7102'
+          - 'node101.example.com:7102'
+          - 'node200.example.com:7202'
+          - 'node201.example.com:7202'
         labels:
-          cluster: 'my_test_cluster'
-  - job_name: 'worker_200'
+          role: 'compute'
+          capability: 'worker'
+    
+    metric_relabel_configs:
+      # Only scrape from nodes with node_type="worker"
+      - source_labels: [node_type]
+        regex: 'worker'
+        action: keep
+
+  # All nodes (unified view)
+  - job_name: 'roole_cluster'
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['roole:7202']
-        labels:
-          cluster: 'my_test_cluster'
+      - targets:
+          - 'node1.example.com:7002'
+          - 'node2.example.com:7002'
+          - 'node100.example.com:7102'
+          - 'node101.example.com:7102'
+          - 'node200.example.com:7202'
+          - 'node201.example.com:7202'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+
+rule_files:
+  - '/etc/prometheus/roole_alerts.yml'

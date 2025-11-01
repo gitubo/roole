@@ -9,6 +9,20 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
+// Forward declarations for all RPC handlers
+int handle_submit_message(rpc_async_context_t *context, 
+                          const uint8_t *in_data, size_t in_len);
+int handle_get_execution_status(rpc_async_context_t *context,
+                                const uint8_t *in_data, size_t in_len);
+int handle_list_dags(rpc_async_context_t *context,
+                     const uint8_t *in_data, size_t in_len);
+int handle_process_message(rpc_async_context_t *context,
+                           const uint8_t *in_data, size_t in_len);
+int handle_execution_update(rpc_async_context_t *context,
+                            const uint8_t *in_data, size_t in_len);
+int handle_sync_catalog(rpc_async_context_t *context,
+                        const uint8_t *in_data, size_t in_len);
+
 // External reference to global node state
 extern unified_node_t* node_get_rpc_state(void);
 
@@ -182,6 +196,7 @@ int handle_get_execution_status(rpc_async_context_t *context,
 // HANDLER: List DAGs
 // ============================================================================
 
+
 int handle_list_dags(rpc_async_context_t *context,
                      const uint8_t *in_data, size_t in_len) {
     (void)in_data;
@@ -195,6 +210,7 @@ int handle_list_dags(rpc_async_context_t *context,
     rule_id_t dag_ids[MAX_DAGS];
     size_t count = dag_catalog_list(&node->dag_catalog, dag_ids, MAX_DAGS);
     
+    // Build response: [count: 4 bytes][dag_id_1: 4 bytes]...
     size_t response_len = sizeof(uint32_t) + count * sizeof(rule_id_t);
     uint8_t *response = malloc(response_len);
     if (!response) {

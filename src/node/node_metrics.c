@@ -44,19 +44,24 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
         return RESULT_ERR_NOMEM;
     }
     
-    // Build common labels
+    // Build standard labels (cluster_name, node_id, node_type)
     char node_id_str[32];
     snprintf(node_id_str, sizeof(node_id_str), "%u", node->node_id);
     
-    metric_label_t labels[3];
-    safe_strncpy(labels[0].name, "node_id", MAX_LABEL_NAME_LEN);
-    safe_strncpy(labels[0].value, node_id_str, MAX_LABEL_VALUE_LEN);
-    safe_strncpy(labels[1].name, "cluster_name", MAX_LABEL_NAME_LEN);
-    safe_strncpy(labels[1].value, node->cluster_name, MAX_LABEL_VALUE_LEN);
-    safe_strncpy(labels[2].name, "node_type", MAX_LABEL_NAME_LEN);
-    safe_strncpy(labels[2].value, "unified", MAX_LABEL_VALUE_LEN);
+    // Determine node_type label based on capabilities
+    const char *node_type_label = node->capabilities.has_ingress ? "router" : "worker";
     
-    // Create counter metrics
+    metric_label_t labels[3];
+    safe_strncpy(labels[0].name, "cluster_name", MAX_LABEL_NAME_LEN);
+    safe_strncpy(labels[0].value, node->cluster_name, MAX_LABEL_VALUE_LEN);
+    
+    safe_strncpy(labels[1].name, "node_id", MAX_LABEL_NAME_LEN);
+    safe_strncpy(labels[1].value, node_id_str, MAX_LABEL_VALUE_LEN);
+    
+    safe_strncpy(labels[2].name, "node_type", MAX_LABEL_NAME_LEN);
+    safe_strncpy(labels[2].value, node_type_label, MAX_LABEL_VALUE_LEN);
+    
+    // Create counter metrics (all with 3 labels)
     node->metric_messages_processed = metrics_get_or_create_counter(
         node->metrics_registry,
         "messages_processed_total",
@@ -78,7 +83,7 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
         3, labels
     );
     
-    // Create gauge metrics
+    // Create gauge metrics (all with 3 labels)
     node->metric_queue_size = metrics_get_or_create_gauge(
         node->metrics_registry,
         "messages_queue_size",
@@ -100,7 +105,7 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
         3, labels
     );
     
-    // Cluster metrics
+    // Cluster metrics (all with 3 labels)
     node->metric_cluster_members_total = metrics_get_or_create_gauge(
         node->metrics_registry,
         "cluster_members_total",
@@ -129,7 +134,7 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
         3, labels
     );
     
-    LOG_INFO("Metrics created successfully");
+    LOG_INFO("All metrics created with standard labels (cluster_name, node_id, node_type)");
     
     // Start HTTP server
     node->metrics_server = metrics_server_start(

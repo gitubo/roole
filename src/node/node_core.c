@@ -18,6 +18,7 @@
 static void on_member_event(node_id_t node_id, node_type_t type,
                            const char *ip, uint16_t data_port,
                            const char *event_type, void *user_data) {
+    (void)type;
     unified_node_t *node = (unified_node_t*)user_data;
 
     // Handle peer join/leave/failure

@@ -68,28 +68,16 @@ static rpc_service_entry_t g_all_handlers[] = {
 rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
     if (!node) return NULL;
     
-    // Count handlers needed
+    // Count handlers needed based on capabilities
     size_t handler_count = 0;
     
-    for (size_t i = 0; g_all_handlers[i].handler != NULL; i++) {
-        uint8_t func_id = g_all_handlers[i].func_id;
-        int include = 0;
-        
-        // INGRESS handlers (only if node has ingress capability)
-        if (func_id == FUNC_ID_SUBMIT_MESSAGE ||
-            func_id == FUNC_ID_GET_STATUS ||
-            func_id == FUNC_ID_LIST_DAGS) {
-            include = node->capabilities.has_ingress;
-        }
-        // DATA handlers (always included for peer communication)
-        else if (func_id == FUNC_ID_PROCESS_MESSAGE ||
-                 func_id == FUNC_ID_EXECUTION_UPDATE ||
-                 func_id == FUNC_ID_SYNC_CATALOG) {
-            include = 1;
-        }
-        
-        if (include) handler_count++;
+    // INGRESS handlers (only if has_ingress capability)
+    if (node->capabilities.has_ingress) {
+        handler_count += 3;  // SUBMIT_MESSAGE, GET_STATUS, LIST_DAGS
     }
+    
+    // DATA handlers (always included for peer communication)
+    handler_count += 3;  // PROCESS_MESSAGE, EXECUTION_UPDATE, SYNC_CATALOG
     
     // Allocate service table (+1 for sentinel)
     rpc_service_entry_t *table = calloc(handler_count + 1, sizeof(rpc_service_entry_t));
@@ -98,39 +86,39 @@ rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
         return NULL;
     }
     
-    // Build filtered table
-    size_t table_idx = 0;
-    for (size_t i = 0; g_all_handlers[i].handler != NULL; i++) {
-        uint8_t func_id = g_all_handlers[i].func_id;
-        int include = 0;
-        
-        // Apply same filtering logic
-        if (func_id == FUNC_ID_SUBMIT_MESSAGE ||
-            func_id == FUNC_ID_GET_STATUS ||
-            func_id == FUNC_ID_LIST_DAGS) {
-            include = node->capabilities.has_ingress;
-        }
-        else if (func_id == FUNC_ID_PROCESS_MESSAGE ||
-                 func_id == FUNC_ID_EXECUTION_UPDATE ||
-                 func_id == FUNC_ID_SYNC_CATALOG) {
-            include = 1;
-        }
-        
-        if (include) {
-            table[table_idx++] = g_all_handlers[i];
-        }
+    size_t idx = 0;
+    
+    // INGRESS handlers (client-facing)
+    if (node->capabilities.has_ingress) {
+        table[idx++] = (rpc_service_entry_t){
+            FUNC_ID_SUBMIT_MESSAGE, handle_submit_message, 8192
+        };
+        table[idx++] = (rpc_service_entry_t){
+            FUNC_ID_GET_STATUS, handle_get_execution_status, 16
+        };
+        table[idx++] = (rpc_service_entry_t){
+            FUNC_ID_LIST_DAGS, handle_list_dags, 4096
+        };
+        LOG_DEBUG("Registered INGRESS handlers (client-facing)");
     }
     
-    // Add sentinel
-    table[table_idx].func_id = 0;
-    table[table_idx].handler = NULL;
-    table[table_idx].max_response_len = 0;
+    // DATA handlers (peer-to-peer) - always included
+    table[idx++] = (rpc_service_entry_t){
+        FUNC_ID_PROCESS_MESSAGE, handle_process_message, 8192
+    };
+    table[idx++] = (rpc_service_entry_t){
+        FUNC_ID_EXECUTION_UPDATE, handle_execution_update, 16
+    };
+    table[idx++] = (rpc_service_entry_t){
+        FUNC_ID_SYNC_CATALOG, handle_sync_catalog, 8192
+    };
+    LOG_DEBUG("Registered DATA handlers (peer communication)");
     
-    LOG_INFO("Built RPC service table with %zu handlers (ingress: %d, execute: %d, route: %d)",
-             handler_count, 
-             node->capabilities.has_ingress,
-             node->capabilities.can_execute,
-             node->capabilities.can_route);
+    // Sentinel
+    table[idx] = (rpc_service_entry_t){0, NULL, 0};
+    
+    LOG_INFO("RPC service table built: %zu handlers (ingress=%d, data=always)",
+             handler_count, node->capabilities.has_ingress);
     
     return table;
 }

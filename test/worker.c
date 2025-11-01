@@ -9,9 +9,60 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
-#include "roole/worker.h"
+#include "roole/node.h"
 #include "roole/config.h"
 #include "roole/common.h"
+
+typedef struct worker_state {
+    node_id_t worker_id;
+    char cluster_name[256];
+    uint16_t gossip_port;
+    uint16_t data_port;
+    char bind_addr[16];
+    
+    // Reuse unified structures
+    dag_catalog_t dag_catalog;
+    uint64_t catalog_version;
+    message_queue_t message_queue;
+    uint32_t active_executions;
+    
+    void *metrics_registry;
+    void *metrics_server;
+    void *metric_messages_processed;
+    void *metric_messages_failed;
+    void *metric_queue_size;
+    void *metric_active_executions;
+    void *metric_uptime_seconds;
+    void *metric_cluster_members_total;
+    void *metric_cluster_members_active;
+    void *metric_cluster_members_suspect;
+    void *metric_cluster_members_dead;
+    
+    uint64_t start_time_ms;
+    
+    struct router_connection {
+        node_id_t router_id;
+        char ip[16];
+        uint16_t service_port;
+        uint16_t data_port;
+        void *service_channel;
+        void *data_channel;
+        uint64_t last_sync_ms;
+        int active;
+    } routers[16];
+    
+    size_t router_count;
+    pthread_mutex_t routers_lock;
+    
+    cluster_view_t cluster_view;
+    membership_handle_t *membership;
+    void *gossip_engine;
+    
+    pthread_t executor_threads[16];
+    size_t num_executor_threads;
+    
+    int shutdown_flag;
+} worker_state_t;
 
 static worker_state_t g_worker;
 static volatile int g_shutdown_requested = 0;
@@ -55,7 +106,6 @@ int main(int argc, char **argv) {
     LOG_WARN("========================================");
     LOG_WARN("You are using the legacy 'worker' binary.");
     LOG_WARN("This binary will be deprecated in a future release.");
-    LOG_WARN("");
     LOG_WARN("Migration: Use the unified 'node' binary instead:");
     
     if (argc >= 3) {
@@ -64,13 +114,11 @@ int main(int argc, char **argv) {
         LOG_WARN("  ./node %s", argv[1]);
     }
     
-    LOG_WARN("");
     LOG_WARN("The unified binary supports:");
     LOG_WARN("  - Same configuration files");
     LOG_WARN("  - Automatic capability detection");
     LOG_WARN("  - Hybrid node deployment");
     LOG_WARN("========================================");
-    LOG_WARN("");
     
     sleep(2);  // Give user time to read notice
 
@@ -189,12 +237,10 @@ int main(int argc, char **argv) {
         LOG_WARN("Consider removing ingress_addr from %s", argv[1]);
     }
     
-    LOG_INFO("");
     LOG_INFO("Capability Explanation:");
     LOG_INFO("  - INGRESS: Disabled (workers don't accept client requests)");
     LOG_INFO("  - EXECUTE: Processes messages routed from ingress nodes");
     LOG_INFO("  - ROUTE: Can forward messages to other nodes if needed");
-    LOG_INFO("");
     
     LOG_INFO("Worker executor threads started (%zu threads)", num_threads);
     
@@ -228,11 +274,11 @@ int main(int argc, char **argv) {
         safe_strncpy(temp_node.bind_addr, g_worker.bind_addr, MAX_IP_LEN);
         temp_node.gossip_port = g_worker.gossip_port;
         temp_node.data_port = g_worker.data_port;
-        temp_node.peer_pool = g_worker.worker_pool;  // Share peer pool
+//        temp_node.peer_pool = g_worker.worker_pool;  // Share peer pool
         temp_node.gossip_engine = g_worker.gossip_engine;
         
         int bootstrap_result = node_bootstrap_with_retry(&temp_node, &config, 3);
-        
+
         if (bootstrap_result == RESULT_OK) {
             LOG_INFO("Worker bootstrap completed successfully");
         } else {
@@ -251,7 +297,6 @@ int main(int argc, char **argv) {
     }
     LOG_INFO("========================================");
     LOG_INFO("Press Ctrl+C to stop");
-    LOG_INFO("");
     
     // Main loop: wait for shutdown signal and update metrics
     while (!g_shutdown_requested) {
@@ -265,7 +310,6 @@ int main(int argc, char **argv) {
     }
     
     // Graceful shutdown
-    LOG_INFO("");
     LOG_INFO("========================================");
     LOG_INFO("Shutting down worker...");
     LOG_INFO("========================================");

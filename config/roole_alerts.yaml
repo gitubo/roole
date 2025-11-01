@@ -1,0 +1,55 @@
+# config/roole_alerts.yml - Prometheus alerting rules
+
+groups:
+  - name: roole_cluster
+    interval: 30s
+    rules:
+      # Node down alert
+      - alert: RooleNodeDown
+        expr: up{job=~"roole_.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Roole node {{ $labels.node_id }} is down"
+          description: "Node {{ $labels.node_id }} ({{ $labels.node_type }}) in cluster {{ $labels.cluster_name }} has been down for more than 1 minute"
+
+      # High message failure rate
+      - alert: RooleHighFailureRate
+        expr: rate(messages_failed_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message failure rate on node {{ $labels.node_id }}"
+          description: "Node {{ $labels.node_id }} has {{ $value }} failed messages/sec"
+
+      # Queue backlog
+      - alert: RooleQueueBacklog
+        expr: messages_queue_size > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Message queue backlog on node {{ $labels.node_id }}"
+          description: "Node {{ $labels.node_id }} has {{ $value }} messages in queue"
+
+      # Cluster size too small
+      - alert: RooleClusterUnderProvisioned
+        expr: cluster_members_active < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Roole cluster has too few active nodes"
+          description: "Cluster {{ $labels.cluster_name }} has only {{ $value }} active nodes (minimum recommended: 3)"
+
+      # Too many suspect nodes
+      - alert: RooleClusterUnhealthy
+        expr: cluster_members_suspect > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Roole cluster has suspect nodes"
+          description: "Cluster {{ $labels.cluster_name }} has {{ $value }} suspect nodes - possible network issues"
