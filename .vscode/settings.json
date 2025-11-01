@@ -1,6 +1,0 @@
-{
-    "files.associations": {
-        "rpc.h": "c",
-        "config.h": "c"
-    }
-}
