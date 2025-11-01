@@ -1,4 +1,4 @@
-// src/router/execution_tracker.c
+// src/node/execution_tracker.c
 
 #include "roole/node.h"
 #include "roole/common.h"
@@ -47,7 +47,7 @@ void execution_tracker_destroy(execution_tracker_t *tracker) {
 }
 
 execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag_id,
-                                    node_id_t worker_id, const uint8_t *message, 
+                                    node_id_t peer_id, const uint8_t *message, 
                                     size_t message_len, uint8_t max_retries) {
     if (!tracker || !message || message_len == 0 || message_len > MAX_MESSAGE_SIZE) {
         return 0;  // Invalid execution_id
@@ -79,7 +79,7 @@ execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag
     
     rec->exec_id = exec_id;
     rec->dag_id = dag_id;
-    rec->assigned_peer = worker_id;
+    rec->assigned_peer = peer_id;
     rec->status = EXEC_STATUS_PENDING;
     rec->submit_time_ms = time_now_ms();
     rec->retry_count = 0;
@@ -92,8 +92,8 @@ execution_id_t execution_tracker_add(execution_tracker_t *tracker, rule_id_t dag
     
     pthread_rwlock_unlock(&tracker->lock);
     
-    LOG_INFO("Tracking execution %lu (DAG %u, worker %u)", 
-                   exec_id, dag_id, worker_id);
+    LOG_INFO("Tracking execution %lu (DAG %u, peer %u)", 
+             exec_id, dag_id, peer_id);
     return exec_id;
 }
 
@@ -162,7 +162,7 @@ size_t execution_tracker_get_by_worker(execution_tracker_t *tracker, node_id_t w
     size_t found = 0;
     for (size_t i = 0; i < tracker->capacity && found < max_count; i++) {
         if (tracker->records[i].active && 
-            tracker->records[i].assigned_peer  == worker_id &&
+            tracker->records[i].assigned_peer == worker_id &&
             tracker->records[i].status != EXEC_STATUS_COMPLETED &&
             tracker->records[i].status != EXEC_STATUS_FAILED) {
             out_exec_ids[found++] = tracker->records[i].exec_id;

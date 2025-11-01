@@ -1,4 +1,4 @@
-// src/worker/message_queue.c
+// src/node/message_queue.c
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -9,7 +9,7 @@
 #include <errno.h>
 
 // ============================================================================
-// message QUEUE IMPLEMENTATION (Thread-safe circular buffer)
+// MESSAGE QUEUE IMPLEMENTATION (Thread-safe circular buffer)
 // ============================================================================
 
 int message_queue_init(message_queue_t *queue, size_t capacity) {
@@ -45,7 +45,7 @@ int message_queue_init(message_queue_t *queue, size_t capacity) {
         return RESULT_ERR_INVALID;
     }
     
-    LOG_INFO("message queue initialized (capacity: %zu)", capacity);
+    LOG_INFO("Message queue initialized (capacity: %zu)", capacity);
     return RESULT_OK;
 }
 
@@ -65,7 +65,7 @@ void message_queue_destroy(message_queue_t *queue) {
     pthread_cond_destroy(&queue->not_empty);
     pthread_mutex_destroy(&queue->lock);
     
-    LOG_INFO("message queue destroyed");
+    LOG_INFO("Message queue destroyed");
 }
 
 int message_queue_push(message_queue_t *queue, const message_t *message) {
@@ -75,7 +75,7 @@ int message_queue_push(message_queue_t *queue, const message_t *message) {
     
     // Wait if queue is full
     while (queue->count >= queue->capacity) {
-        LOG_WARN("message queue full, waiting...");
+        LOG_WARN("Message queue full, waiting...");
         pthread_cond_wait(&queue->not_full, &queue->lock);
     }
     
@@ -89,7 +89,7 @@ int message_queue_push(message_queue_t *queue, const message_t *message) {
     // Signal that queue is not empty
     pthread_cond_signal(&queue->not_empty);
     
-    LOG_DEBUG("message %lu enqueued (queue size: %zu)", message->exec_id, queue->count);
+    LOG_DEBUG("Message %lu enqueued (queue size: %zu)", message->exec_id, queue->count);
     return RESULT_OK;
 }
 
@@ -140,7 +140,7 @@ int message_queue_pop(message_queue_t *queue, message_t *out_message, int timeou
     // Signal that queue is not full
     pthread_cond_signal(&queue->not_full);
     
-    LOG_DEBUG("message %lu dequeued (queue size: %zu)", out_message->exec_id, queue->count);
+    LOG_DEBUG("Message %lu dequeued (queue size: %zu)", out_message->exec_id, queue->count);
     return RESULT_OK;
 }
 

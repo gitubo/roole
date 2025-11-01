@@ -41,11 +41,12 @@ add_library(roole_cluster STATIC
 target_link_libraries(roole_cluster roole_core)
 
 # ============================================================================
-# NODE LIBRARY (Unified - replaces router + worker)
+# NODE LIBRARY (Unified - all node functionality)
 # ============================================================================
 add_library(roole_node STATIC
-    # Core node functionality
     src/node/peer_pool.c
+    src/node/message_queue.c
+    src/node/execution_tracker.c
     src/node/node_metrics.c
     src/node/node_rpc.c
     src/node/node_handlers.c
@@ -53,12 +54,6 @@ add_library(roole_node STATIC
     src/node/node_capabilities.c
     src/node/node_core.c
     src/node/node_bootstrap.c
-    
-    # Moved from worker library
-    src/worker/message_queue.c
-    
-    # Moved from router library
-    src/router/execution_tracker.c
 )
 target_link_libraries(roole_node 
     PUBLIC roole_core roole_dag roole_cluster
@@ -66,56 +61,16 @@ target_link_libraries(roole_node
 )
 
 # ============================================================================
-# LEGACY LIBRARIES (For backward compatibility with old test binaries)
-# ============================================================================
-option(BUILD_LEGACY_BINARIES "Build deprecated router/worker binaries" OFF)
-
-if(BUILD_LEGACY_BINARIES)
-    message(WARNING "Building LEGACY binaries - these are DEPRECATED")
-    message(WARNING "Use -DBUILD_LEGACY_BINARIES=OFF to disable")
-    
-    # Legacy router library (minimal wrapper around roole_node)
-    add_library(roole_router STATIC
-        src/router/router_core.c
-        src/router/load_balancer.c
-        src/router/message_handler.c
-        src/router/rpc_handler.c
-    )
-    target_link_libraries(roole_router roole_node)
-    
-    # Legacy worker library (minimal wrapper around roole_node)
-    add_library(roole_worker STATIC
-        src/worker/worker_core.c
-        src/worker/message_handler.c
-        src/worker/rpc_handler.c
-    )
-    target_link_libraries(roole_worker roole_node)
-endif()
-
-# ============================================================================
 # EXECUTABLES
 # ============================================================================
 
-# Unified node binary (RECOMMENDED)
+# Unified node binary
 add_executable(node test/node.c)
 target_link_libraries(node roole_node)
 
 # Client binary
 add_executable(client test/client.c)
 target_link_libraries(client roole_core)
-
-# Legacy binaries (DEPRECATED)
-if(BUILD_LEGACY_BINARIES)
-    add_executable(router test/router.c)
-    target_link_libraries(router roole_router roole_node)
-    
-    add_executable(worker test/worker.c)
-    target_link_libraries(worker roole_worker roole_node)
-    
-    install(TARGETS router worker
-        RUNTIME DESTINATION bin
-    )
-endif()
 
 # ============================================================================
 # INSTALL TARGETS
@@ -126,8 +81,6 @@ install(TARGETS node client
 
 install(DIRECTORY include/roole
     DESTINATION include
-    PATTERN "router.h" EXCLUDE
-    PATTERN "worker.h" EXCLUDE
 )
 
 # ============================================================================
@@ -147,19 +100,17 @@ endif()
 # SUMMARY
 # ============================================================================
 message(STATUS "==============================================")
-message(STATUS "Roole Configuration Summary")
+message(STATUS "Roole Build Configuration")
 message(STATUS "==============================================")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C Compiler: ${CMAKE_C_COMPILER}")
 message(STATUS "C Flags: ${CMAKE_C_FLAGS}")
 message(STATUS "Install Prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "Build Tests: ${BUILD_TESTS}")
-message(STATUS "Build Legacy Binaries: ${BUILD_LEGACY_BINARIES}")
-if(BUILD_LEGACY_BINARIES)
-    message(STATUS "")
-    message(STATUS "⚠️  WARNING: Legacy binaries enabled")
-    message(STATUS "   These are DEPRECATED and will be removed in v0.3.0")
-    message(STATUS "   Use -DBUILD_LEGACY_BINARIES=OFF to disable")
-endif()
+message(STATUS "")
+message(STATUS "Binaries:")
+message(STATUS "  - node   (unified node binary)")
+message(STATUS "  - client (test client)")
+message(STATUS "")
 message(STATUS "Metrics: Built-in (no external dependencies)")
 message(STATUS "==============================================")
