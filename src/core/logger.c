@@ -216,7 +216,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
     if (g_log_context.initialized) {
         if (component_path[0] != '\0') {
             written = snprintf(buf->data + buf->used, LOG_BUFFER_SIZE - buf->used,
-                            "[%s][%s][node:%u][%s][%s][%s][%s:%d] ",
+                            "[%s][%s][node:%u][%s][%s][tid:%04lx][%s:%d] ",
                             timestamp, level_to_string(level),
                             g_log_context.node_id, g_log_context.cluster_name,
                             component_path, 
@@ -224,7 +224,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
                             file, line);
         } else {
             written = snprintf(buf->data + buf->used, LOG_BUFFER_SIZE - buf->used,
-                            "[%s][%s][node:%u][%s][tid:%lx][%s:%d] ",
+                            "[%s][%s][node:%u][%s]tid:%04lx[%s:%d] ",
                             timestamp, level_to_string(level),
                             g_log_context.node_id, g_log_context.cluster_name,
                             thread_id % 0xFFFF,
@@ -232,7 +232,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
         }
     } else {
         written = snprintf(buf->data + buf->used, LOG_BUFFER_SIZE - buf->used,
-                        "[%s][%s][tid:%lx][%s:%d] ",
+                        "[%s][%s]tid:%04lx[%s:%d] ",
                         timestamp, level_to_string(level), thread_id % 0xFFFF,
                         file, line);
     }

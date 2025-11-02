@@ -38,7 +38,7 @@ echo ""
 
 # Start ingress node (seed)
 echo "[1/3] Starting INGRESS NODE (client-facing)..."
-../build/bin/roole-node config/router.ini > logs/ingress_node.log 2>&1 &
+../build/bin/roole-node /app/config/router.ini > logs/ingress_node.log 2>&1 &
 INGRESS_PID=$!
 echo "      PID: $INGRESS_PID"
 
@@ -52,7 +52,7 @@ fi
 
 # Start compute node 1
 echo "[2/3] Starting COMPUTE NODE 100..."
-../build/bin/roole-node config/worker_100.ini 4 > logs/compute_100.log 2>&1 &
+../build/bin/roole-node /app/config/worker_100.ini 4 > logs/compute_100.log 2>&1 &
 COMPUTE1_PID=$!
 echo "      PID: $COMPUTE1_PID"
 
@@ -66,7 +66,7 @@ fi
 
 # Start compute node 2
 echo "[3/3] Starting COMPUTE NODE 200..."
-../build/bin/roole-node config/worker_200.ini 4 > logs/compute_200.log 2>&1 &
+../build/bin/roole-node /app/config/worker_200.ini 4 > logs/compute_200.log 2>&1 &
 COMPUTE2_PID=$!
 echo "      PID: $COMPUTE2_PID"
 

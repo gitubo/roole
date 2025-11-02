@@ -61,7 +61,7 @@ int handle_sync_catalog(rpc_async_context_t *context,
 // ============================================================================
 // UNIFIED RPC SERVICE TABLE (All possible handlers)
 // ============================================================================
-
+/*
 static rpc_service_entry_t g_all_handlers[] = {
     // Client operations (INGRESS only)
     { FUNC_ID_SUBMIT_MESSAGE, handle_submit_message, 8192 },
@@ -76,7 +76,7 @@ static rpc_service_entry_t g_all_handlers[] = {
     // Sentinel
     { 0, NULL, 0 }
 };
-
+*/
 // ============================================================================
 // DYNAMIC SERVICE TABLE BUILDER
 // ============================================================================

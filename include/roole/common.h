@@ -47,7 +47,7 @@ typedef enum {
 // ============================================================================
 // LOGGING
 // ============================================================================
-
+/*
 typedef enum {
     LOG_LEVEL_DEBUG = 0,
     LOG_LEVEL_INFO = 1,
@@ -63,7 +63,7 @@ void std_log(log_level_t level, const char *file, int line,
 #define LOG_INFO(...)  std_log(LOG_LEVEL_INFO,  __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_WARN(...)  std_log(LOG_LEVEL_WARN,  __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_ERROR(...) std_log(LOG_LEVEL_ERROR, __FILE__, __LINE__, __VA_ARGS__)
-
+*/
 // ============================================================================
 // TIMING UTILITIES
 // ============================================================================
