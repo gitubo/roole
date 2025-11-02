@@ -5,6 +5,7 @@
 #include "roole/node.h"
 #include "roole/rpc.h"
 #include "roole/common.h"
+#include "roole/service_registry.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -12,14 +13,29 @@
 // GLOBAL STATE (Set by node initialization)
 // ============================================================================
 
-static unified_node_t *g_node_state = NULL;
+//static unified_node_t *g_node_state = NULL;
 
 void node_set_rpc_state(unified_node_t *node) {
-    g_node_state = node;
+    service_registry_t *registry = service_registry_global();
+    if (!registry) {
+        LOG_ERROR("Global service registry not initialized");
+        return;
+    }
+    
+    service_registry_register(registry, SERVICE_TYPE_NODE_STATE, 
+                             "unified_node", node);
 }
 
 unified_node_t* node_get_rpc_state(void) {
-    return g_node_state;
+    service_registry_t *registry = service_registry_global();
+    if (!registry) {
+        LOG_ERROR("Global service registry not initialized");
+        return NULL;
+    }
+    
+    return (unified_node_t*)service_registry_get(registry, 
+                                                 SERVICE_TYPE_NODE_STATE,
+                                                 "unified_node");
 }
 
 // ============================================================================
@@ -139,6 +155,12 @@ int node_start_rpc_servers(unified_node_t *node, rpc_service_entry_t *service_ta
     // Set global state for handlers
     node_set_rpc_state(node);
     
+    service_registry_t *registry = service_registry_global();
+    if (registry) {
+        service_registry_register(registry, SERVICE_TYPE_RPC_SERVER,
+                                 "service_table", service_table);
+    }
+
     LOG_INFO("========================================");
     LOG_INFO("Starting RPC servers:");
     LOG_INFO("  DATA channel: port %u (peer communication)", node->data_port);

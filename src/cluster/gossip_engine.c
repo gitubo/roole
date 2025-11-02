@@ -931,6 +931,8 @@ static void dispatch_message(gossip_engine_t *engine,
 static void* gossip_listener_thread(void *arg) {
     gossip_engine_t *engine = (gossip_engine_t*)arg;
     
+    logger_push_component("gossip:listener");
+
     LOG_INFO("Gossip UDP listener thread started (fd=%d)", engine->udp_socket);
     
     uint8_t recv_buffer[GOSSIP_MAX_PAYLOAD_SIZE];
@@ -1018,6 +1020,7 @@ static void* gossip_listener_thread(void *arg) {
     }
     
     LOG_INFO("Gossip UDP listener thread stopped");
+    logger_pop_component();
     return NULL;
 }
 
@@ -1321,7 +1324,8 @@ static void update_self_in_cluster_view(gossip_engine_t *engine) {
 
 static void* gossip_protocol_thread(void *arg) {
     gossip_engine_t *engine = (gossip_engine_t*)arg;
-    
+
+    logger_push_component("gossip:protocol");
     LOG_INFO("SWIM protocol thread started (period=%ums)", 
              engine->config.protocol_period_ms);
     
@@ -1393,6 +1397,7 @@ static void* gossip_protocol_thread(void *arg) {
     }
     
     LOG_INFO("SWIM protocol thread stopped");
+    logger_pop_component();
     return NULL;
 }
 

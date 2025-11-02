@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include "roole/rpc.h"
 #include "roole/common.h"
+#include "roole/logger.h"
 
 //#define FUNC_ID_SUBMIT_MESSAGE 0x25  
 //#define FUNC_ID_GET_STATUS 0x41
@@ -52,7 +53,10 @@ int main(int argc, char **argv) {
     uint16_t router_port = (uint16_t)atoi(argv[2]);
     const char *message = (argc >= 4) ? argv[3] : "Test Message";
     
-    log_set_level(LOG_LEVEL_INFO);
+    logger_init();
+    logger_set_level(LOG_LEVEL_INFO);
+    logger_set_context(0, "roole-client", "client");  // More descriptive cluster name
+    logger_push_component("test-client");
     
     LOG_INFO("========================================");
     LOG_INFO("Roole RPC Client");
@@ -236,5 +240,7 @@ int main(int argc, char **argv) {
     LOG_INFO("Client test completed");
     LOG_INFO("========================================");
     
+    logger_shutdown();
+
     return 0;
 }

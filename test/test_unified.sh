@@ -38,7 +38,7 @@ echo ""
 
 # Start ingress node (seed)
 echo "[1/3] Starting INGRESS NODE (client-facing)..."
-./node config/router.ini > logs/ingress_node.log 2>&1 &
+../build/bin/roole-node config/router.ini > logs/ingress_node.log 2>&1 &
 INGRESS_PID=$!
 echo "      PID: $INGRESS_PID"
 
@@ -52,7 +52,7 @@ fi
 
 # Start compute node 1
 echo "[2/3] Starting COMPUTE NODE 100..."
-./node config/worker_100.ini 4 > logs/compute_100.log 2>&1 &
+../build/bin/roole-node config/worker_100.ini 4 > logs/compute_100.log 2>&1 &
 COMPUTE1_PID=$!
 echo "      PID: $COMPUTE1_PID"
 
@@ -66,7 +66,7 @@ fi
 
 # Start compute node 2
 echo "[3/3] Starting COMPUTE NODE 200..."
-./node config/worker_200.ini 4 > logs/compute_200.log 2>&1 &
+../build/bin/roole-node config/worker_200.ini 4 > logs/compute_200.log 2>&1 &
 COMPUTE2_PID=$!
 echo "      PID: $COMPUTE2_PID"
 
@@ -102,7 +102,7 @@ sleep 5
 
 # Send test message
 echo "Sending test message to cluster..."
-./client 127.0.0.1 8081 "Hello Unified Cluster" || {
+../build/bin/roole-client 127.0.0.1 8081 "Hello Unified Cluster" || {
     echo "✗ Test message failed"
     kill $INGRESS_PID $COMPUTE1_PID $COMPUTE2_PID 2>/dev/null
     exit 1
@@ -116,7 +116,7 @@ echo "Cluster Running Successfully"
 echo "=========================================="
 echo ""
 echo "Available commands:"
-echo "  - Send message:    ./client 127.0.0.1 8081 'Your message'"
+echo "  - Send message:    ../build/bin/roole-client 127.0.0.1 8081 'Your message'"
 echo "  - View metrics:    curl http://localhost:7002/metrics"
 echo "  - View logs:       tail -f logs/ingress_node.log"
 echo "  - Stop cluster:    kill $INGRESS_PID $COMPUTE1_PID $COMPUTE2_PID"

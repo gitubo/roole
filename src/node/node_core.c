@@ -5,6 +5,8 @@
 #include "roole/node.h"
 #include "roole/config.h"
 #include "roole/common.h"
+#include "roole/logger.h"
+#include "roole/service_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,7 +68,7 @@ static void on_member_event(node_id_t node_id, node_type_t type,
 
 static void* node_cleanup_thread_fn(void *arg) {
     unified_node_t *node = (unified_node_t*)arg;
-    
+    logger_push_component("cleanup");
     LOG_INFO("Node cleanup thread started");
     
     while (!node->shutdown_flag) {
@@ -80,6 +82,7 @@ static void* node_cleanup_thread_fn(void *arg) {
     }
     
     LOG_INFO("Node cleanup thread stopped");
+    logger_pop_component();
     return NULL;
 }
 
@@ -93,6 +96,18 @@ int node_init(unified_node_t *node, const roole_config_t *config,
     
     memset(node, 0, sizeof(unified_node_t));
     
+    // SET LOGGER CONTEXT FIRST (before any LOG calls)
+    const char *node_type_str = (config->node_type == NODE_TYPE_ROUTER) ? "router" : "worker";
+    logger_set_context(config->node_id, config->cluster_name, node_type_str);
+    
+    // CREATE AND SET GLOBAL SERVICE REGISTRY
+    service_registry_t *registry = service_registry_create();
+    if (!registry) {
+        LOG_ERROR("Failed to create service registry");
+        return RESULT_ERR_NOMEM;
+    }
+    service_registry_set_global(registry);
+
     // Parse addresses
     char gossip_ip[16], data_ip[16], ingress_ip[16], metrics_ip[16];
     uint16_t gossip_port, data_port, ingress_port = 0, metrics_port = 0;
@@ -269,6 +284,12 @@ void node_shutdown(unified_node_t *node) {
     // Set shutdown flag
     node->shutdown_flag = 1;
     
+    // Unregister from service registry
+    service_registry_t *registry = service_registry_global();
+    if (registry) {
+        service_registry_unregister(registry, SERVICE_TYPE_NODE_STATE, "unified_node");
+    }
+
     // Stop executor threads
     if (node->executor_threads && node->capabilities.can_execute) {
         LOG_INFO("Stopping executor threads...");
@@ -308,9 +329,17 @@ void node_shutdown(unified_node_t *node) {
     peer_pool_destroy(&node->peer_pool);
     dag_catalog_destroy(&node->dag_catalog);
     
+    // Destroy global registry
+    if (registry) {
+        service_registry_set_global(NULL);
+        service_registry_destroy(registry);
+    }
+
     LOG_INFO("========================================");
     LOG_INFO("Node %u shutdown complete", node->node_id);
     LOG_INFO("========================================");
+    logger_flush();
+
 }
 
 // ============================================================================

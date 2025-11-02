@@ -4,7 +4,8 @@
 
 #include "roole/rpc.h"
 #include "roole/common.h"
-
+#include "roole/logger.h"
+#include "roole/service_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,9 +31,26 @@
 // GLOBAL STATE (Single-threaded access in worker event loop)
 // ============================================================================
 
-static rpc_service_entry_t *g_service_table = NULL;
+//static rpc_service_entry_t *g_service_table = NULL;
 static rpc_async_context_t *g_pending_contexts = NULL; 
 static uint64_t g_rpc_request_counter = 0;
+
+static rpc_service_entry_t* get_service_table(void) {
+    service_registry_t *registry = service_registry_global();
+    if (!registry) return NULL;
+    
+    return (rpc_service_entry_t*)service_registry_get(registry,
+                                                      SERVICE_TYPE_RPC_SERVER,
+                                                      "service_table");
+}
+
+static void set_service_table(rpc_service_entry_t *table) {
+    service_registry_t *registry = service_registry_global();
+    if (!registry) return;
+    
+    service_registry_register(registry, SERVICE_TYPE_RPC_SERVER,
+                             "service_table", table);
+}
 
 // ============================================================================
 // TIMING UTILITIES
@@ -417,6 +435,7 @@ static void process_buffered_data(rpc_channel_t *channel) {
     rpc_header_t header;
     size_t processed_bytes = 0;
     
+    rpc_service_entry_t *g_service_table = get_service_table();
     if (g_service_table == NULL) {
         LOG_ERROR("[RPC] Service table not initialized. Dropping requests");
         channel->rx_data_len = 0;
@@ -502,9 +521,11 @@ static void process_buffered_data(rpc_channel_t *channel) {
 
 static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
                                         rpc_service_entry_t *service_table) {
+    logger_push_component("rpc:server");
     struct epoll_event event, events[MAX_EVENTS];
 
-    g_service_table = service_table;
+    //g_service_table = service_table;
+    set_service_table(service_table);
 
     // Main event loop
     while (1) {

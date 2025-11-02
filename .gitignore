@@ -1,10 +1,37 @@
-build/
-cmake/
+# Docker files
 dockerfile
 Dockerfile
-.vscode/
 *.crt
+
+# Build artifacts
+cmake/
+build/
+bin/
 *.o
+*.a
 *.obj
 *.exe
 *.out
+
+# Binaries
+roole-node
+roole-client
+node
+client
+router
+worker
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

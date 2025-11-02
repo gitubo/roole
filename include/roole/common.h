@@ -8,6 +8,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
+#include "roole/logger.h" 
+
+// Legacy compatibility (redirects to new logger)
+#define log_set_level(level) logger_set_level(level)
 
 // ============================================================================
 // VERSION & CONSTANTS

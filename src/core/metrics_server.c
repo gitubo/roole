@@ -7,6 +7,7 @@
 #include "roole/metrics_server.h"
 #include "roole/metrics.h"
 #include "roole/common.h"
+#include "roole/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -283,6 +284,7 @@ static int setup_server_socket(const char *bind_addr, uint16_t port) {
 static void* metrics_server_thread_fn(void *arg) {
     metrics_server_t *server = (metrics_server_t*)arg;
     
+    logger_push_component("metrics:http");
     LOG_INFO("Metrics HTTP server thread started (bind=%s, port=%u)", 
              server->bind_addr, server->port);
     
@@ -378,6 +380,7 @@ static void* metrics_server_thread_fn(void *arg) {
     }
     
     LOG_INFO("Metrics HTTP server thread stopped");
+    logger_pop_component();
     return NULL;
 }
 

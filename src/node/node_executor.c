@@ -17,6 +17,7 @@
 void* node_executor_thread_fn(void *arg) {
     unified_node_t *node = (unified_node_t*)arg;
     
+    logger_push_component("executor");
     LOG_INFO("Node executor thread started");
     
     while (!node->shutdown_flag) {
@@ -177,6 +178,7 @@ void* node_executor_thread_fn(void *arg) {
     }
     
     LOG_INFO("Node executor thread stopped");
+    logger_pop_component();
     return NULL;
 }
 

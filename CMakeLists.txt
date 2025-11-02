@@ -15,6 +15,8 @@ add_library(roole_core STATIC
     src/core/rpc.c
     src/core/common.c
     src/core/config.c
+    src/core/logger.c
+    src/core/service_registry.c
     src/core/metrics.c
     src/core/metrics_server.c
 )
@@ -64,19 +66,35 @@ target_link_libraries(roole_node
 # EXECUTABLES
 # ============================================================================
 
-# Unified node binary
-add_executable(node test/node.c)
+# Unified node binary (main entry point)
+add_executable(node src/node/node_main.c)
 target_link_libraries(node roole_node)
+set_target_properties(node PROPERTIES
+    OUTPUT_NAME "roole-node"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 
-# Client binary
+# Client binary (testing tool - stays in test/)
 add_executable(client test/client.c)
 target_link_libraries(client roole_core)
+set_target_properties(client PROPERTIES
+    OUTPUT_NAME "roole-client"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 
 # ============================================================================
 # INSTALL TARGETS
 # ============================================================================
 install(TARGETS node client
     RUNTIME DESTINATION bin
+)
+
+# Install with proper names
+install(PROGRAMS 
+    "${CMAKE_BINARY_DIR}/bin/roole-node"
+    "${CMAKE_BINARY_DIR}/bin/roole-client"
+    DESTINATION bin
+    OPTIONAL
 )
 
 install(DIRECTORY include/roole
@@ -99,18 +117,10 @@ endif()
 # ============================================================================
 # SUMMARY
 # ============================================================================
-message(STATUS "==============================================")
-message(STATUS "Roole Build Configuration")
-message(STATUS "==============================================")
-message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "C Compiler: ${CMAKE_C_COMPILER}")
-message(STATUS "C Flags: ${CMAKE_C_FLAGS}")
-message(STATUS "Install Prefix: ${CMAKE_INSTALL_PREFIX}")
-message(STATUS "Build Tests: ${BUILD_TESTS}")
 message(STATUS "")
 message(STATUS "Binaries:")
-message(STATUS "  - node   (unified node binary)")
-message(STATUS "  - client (test client)")
+message(STATUS "  - roole-node   (unified node binary) [src/node/node_main.c]")
+message(STATUS "  - roole-client (test client) [test/client.c]")
 message(STATUS "")
-message(STATUS "Metrics: Built-in (no external dependencies)")
-message(STATUS "==============================================")
+message(STATUS "Output: ${CMAKE_BINARY_DIR}/bin/")
+message(STATUS "")

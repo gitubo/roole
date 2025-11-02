@@ -38,7 +38,7 @@ void timespec_now(struct timespec *ts) {
 // ============================================================================
 // LOGGING
 // ============================================================================
-
+/*
 static log_level_t g_log_level = LOG_LEVEL_INFO;
 
 void log_set_level(log_level_t level) {
@@ -71,6 +71,7 @@ void std_log(log_level_t level, const char *file, int line,
     fprintf(out, "\n");
     fflush(out);
 }
+*/
 
 // ============================================================================
 // MEMORY UTILITIES
