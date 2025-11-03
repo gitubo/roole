@@ -1,7 +1,7 @@
 // src/cluster/membership.c
 
 #define _POSIX_C_SOURCE 200809L
-#define _DEFAULT_SOURCE
+//#define _DEFAULT_SOURCE
 
 #include "roole/cluster.h"
 #include "roole/common.h"
@@ -368,4 +368,39 @@ size_t membership_get_members(membership_handle_t *handle, cluster_member_t *out
     pthread_rwlock_unlock(&handle->internal_view.lock);
     
     return count;
+}
+
+// ============================================================================
+// DEBUG HELPERS
+// ============================================================================
+
+void cluster_view_dump(cluster_view_t *view, const char *label) {
+    if (!view) return;
+    
+    pthread_rwlock_rdlock(&view->lock);
+    
+    LOG_INFO("========================================");
+    LOG_INFO("Cluster View Dump: %s", label ? label : "");
+    LOG_INFO("========================================");
+    LOG_INFO("Total members: %zu (capacity: %zu)", view->count, view->capacity);
+    
+    if (view->count == 0) {
+        LOG_INFO("  (empty)");
+    } else {
+        for (size_t i = 0; i < view->count; i++) {
+            cluster_member_t *m = &view->members[i];
+            const char *status_str = (m->status == NODE_STATUS_ALIVE) ? "ALIVE" :
+                                    (m->status == NODE_STATUS_SUSPECT) ? "SUSPECT" : "DEAD";
+            const char *type_str = (m->node_type == NODE_TYPE_ROUTER) ? "ROUTER" : "WORKER";
+            
+            LOG_INFO("  [%zu] node_id=%u type=%s status=%s ip=%s:%u data=%u inc=%lu last_seen=%lu",
+                    i, m->node_id, type_str, status_str,
+                    m->ip_address, m->gossip_port, m->data_port,
+                    m->incarnation, m->last_seen_ms);
+        }
+    }
+    
+    LOG_INFO("========================================");
+    
+    pthread_rwlock_unlock(&view->lock);
 }

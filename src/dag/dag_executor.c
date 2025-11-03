@@ -1,7 +1,7 @@
 // src/dag/dag_executor.c
 
 #define _POSIX_C_SOURCE 200809L
-#define _DEFAULT_SOURCE
+//#define _DEFAULT_SOURCE
 
 #include "roole/dag.h"
 #include "roole/common.h"

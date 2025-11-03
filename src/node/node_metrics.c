@@ -5,6 +5,8 @@
 #include "roole/node.h"
 #include "roole/config.h"
 #include "roole/common.h"
+#include "roole/event_bus.h"
+#include "roole/service_registry.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -195,6 +197,32 @@ void node_metrics_update_periodic(unified_node_t *node) {
     
     // Update cluster metrics
     node_metrics_update_cluster(node);
+
+        // Update cluster metrics
+    node_metrics_update_cluster(node);
+    
+    // UPDATE EVENT BUS METRICS
+    service_registry_t *registry = service_registry_global();
+    if (registry) {
+        event_bus_t *event_bus = (event_bus_t*)service_registry_get(registry,
+                                                                     SERVICE_TYPE_EVENT_BUS,
+                                                                     "main");
+        if (event_bus) {
+            event_bus_stats_t stats;
+            event_bus_get_stats(event_bus, &stats);
+            
+            // TODO: Add event bus metrics to registry if needed
+            // For now, just log periodically
+            static uint64_t last_log = 0;
+            uint64_t now = time_now_ms();
+            if (now - last_log > 60000) {  // Every 60 seconds
+                LOG_INFO("Event bus stats: published=%lu dispatched=%lu dropped=%lu queue=%lu subs=%lu",
+                        stats.events_published, stats.events_dispatched, 
+                        stats.events_dropped, stats.queue_size, stats.subscribers_total);
+                last_log = now;
+            }
+        }
+    }
 }
 
 void node_metrics_update_cluster(unified_node_t *node) {

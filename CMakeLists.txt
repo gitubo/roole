@@ -15,8 +15,10 @@ add_library(roole_core STATIC
     src/core/rpc.c
     src/core/common.c
     src/core/config.c
+    src/core/config_validator.c
     src/core/logger.c
     src/core/service_registry.c
+    src/core/event_bus.c
     src/core/metrics.c
     src/core/metrics_server.c
 )

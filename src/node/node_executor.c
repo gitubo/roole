@@ -5,6 +5,8 @@
 #include "roole/node.h"
 #include "roole/dag.h"
 #include "roole/common.h"
+#include "roole/event_bus.h"
+#include "roole/service_registry.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -46,6 +48,31 @@ void* node_executor_thread_fn(void *arg) {
         LOG_INFO("Processing message %lu (DAG %u, waited %lu ms)", 
                  message.exec_id, message.dag_id, wait_time_ms);
         
+        // PUBLISH EXECUTION_STARTED EVENT
+        service_registry_t *registry = service_registry_global();
+        event_bus_t *event_bus = NULL;
+        if (registry) {
+            event_bus = (event_bus_t*)service_registry_get(registry,
+                                                           SERVICE_TYPE_EVENT_BUS,
+                                                           "main");
+        }
+        
+        if (event_bus) {
+            event_t event = {
+                .type = EVENT_TYPE_EXECUTION_STARTED,
+                .timestamp_ms = time_now_ms(),
+                .source_node_id = node->node_id,
+                .data.execution = {
+                    .exec_id = message.exec_id,
+                    .dag_id = message.dag_id,
+                    .assigned_peer = node->node_id,
+                    .timestamp_ms = time_now_ms(),
+                    .status_code = 0
+                }
+            };
+            event_bus_publish(event_bus, &event);
+        }
+
         // Increment active executions
         __sync_fetch_and_add(&node->active_executions, 1);
         
@@ -95,12 +122,46 @@ void* node_executor_thread_fn(void *arg) {
                 status = EXEC_STATUS_COMPLETED;
                 LOG_INFO("Message %lu completed successfully", message.exec_id);
                 
+                // PUBLISH EXECUTION_COMPLETED EVENT
+                if (event_bus) {
+                    event_t event = {
+                        .type = EVENT_TYPE_EXECUTION_COMPLETED,
+                        .timestamp_ms = time_now_ms(),
+                        .source_node_id = node->node_id,
+                        .data.execution = {
+                            .exec_id = message.exec_id,
+                            .dag_id = message.dag_id,
+                            .assigned_peer = node->node_id,
+                            .timestamp_ms = time_now_ms(),
+                            .status_code = 0
+                        }
+                    };
+                    event_bus_publish(event_bus, &event);
+                }
+                
                 if (node->metric_messages_processed) {
                     metrics_counter_inc(node->metric_messages_processed);
                 }
             } else {
                 status = EXEC_STATUS_FAILED;
                 LOG_ERROR("Message %lu execution failed", message.exec_id);
+                
+                // PUBLISH EXECUTION_FAILED EVENT
+                if (event_bus) {
+                    event_t event = {
+                        .type = EVENT_TYPE_EXECUTION_FAILED,
+                        .timestamp_ms = time_now_ms(),
+                        .source_node_id = node->node_id,
+                        .data.execution = {
+                            .exec_id = message.exec_id,
+                            .dag_id = message.dag_id,
+                            .assigned_peer = node->node_id,
+                            .timestamp_ms = time_now_ms(),
+                            .status_code = exec_result
+                        }
+                    };
+                    event_bus_publish(event_bus, &event);
+                }
                 
                 if (node->metric_messages_failed) {
                     metrics_counter_inc(node->metric_messages_failed);

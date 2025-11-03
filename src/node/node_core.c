@@ -7,6 +7,7 @@
 #include "roole/common.h"
 #include "roole/logger.h"
 #include "roole/service_registry.h"
+#include "roole/event_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,51 +15,141 @@
 #include <pthread.h>
 
 // ============================================================================
-// MEMBER EVENT CALLBACK
+// MEMBER EVENT CALLBACK (Publishes to Event Bus)
 // ============================================================================
 
 static void on_member_event(node_id_t node_id, node_type_t type,
                            const char *ip, uint16_t data_port,
-                           const char *event_type, void *user_data) {
+                           const char *event_type_str, void *user_data) {
     (void)type;
     unified_node_t *node = (unified_node_t*)user_data;
-
-    // Handle peer join/leave/failure
-    if (strcmp(event_type, MEMBER_EVENT_JOIN) == 0) {
+    
+    // Get event bus from registry
+    service_registry_t *registry = service_registry_global();
+    event_bus_t *event_bus = NULL;
+    if (registry) {
+        event_bus = (event_bus_t*)service_registry_get(registry, 
+                                                       SERVICE_TYPE_EVENT_BUS, 
+                                                       "main");
+    }
+    
+    // Determine event type
+    event_type_t ev_type;
+    if (strcmp(event_type_str, MEMBER_EVENT_JOIN) == 0) {
+        ev_type = EVENT_TYPE_PEER_JOINED;
         LOG_INFO("Peer %u joined cluster (%s:%u)", node_id, ip, data_port);
+    } else if (strcmp(event_type_str, MEMBER_EVENT_FAILED) == 0) {
+        ev_type = EVENT_TYPE_PEER_FAILED;
+        LOG_WARN("Peer %u failed", node_id);
+    } else if (strcmp(event_type_str, MEMBER_EVENT_LEAVE) == 0) {
+        ev_type = EVENT_TYPE_PEER_LEFT;
+        LOG_WARN("Peer %u left", node_id);
+    } else if (strcmp(event_type_str, MEMBER_EVENT_UPDATE) == 0) {
+        ev_type = EVENT_TYPE_PEER_UPDATED;
+        LOG_DEBUG("Peer %u updated", node_id);
+    } else {
+        return;  // Unknown event
+    }
+    
+    // Publish event to bus
+    if (event_bus) {
+        event_t event = {
+            .type = ev_type,
+            .timestamp_ms = time_now_ms(),
+            .source_node_id = node->node_id,
+            .data.peer = {
+                .node_id = node_id,
+                .node_type = type,
+                .data_port = data_port,
+                .status = NODE_STATUS_ALIVE
+            }
+        };
+        safe_strncpy(event.data.peer.ip_address, ip, MAX_IP_LEN);
         
-        // Add to peer pool
+        event_bus_publish(event_bus, &event);
+    }
+    
+    // Original logic (will be moved to event subscribers in next step)
+    if (strcmp(event_type_str, MEMBER_EVENT_JOIN) == 0) {
         peer_pool_add(&node->peer_pool, node_id, ip, 0, data_port);
         
-        // Establish DATA channel connection
         peer_info_t *peer = peer_pool_get(&node->peer_pool, node_id);
         if (peer) {
             if (!peer->data_channel) {
                 peer->data_channel = safe_malloc(sizeof(rpc_channel_t));
                 if (peer->data_channel) {
-                    if (rpc_client_connect(peer->data_channel, ip, data_port,
-                                          RPC_CHANNEL_DATA, 4096) == 0) {
-                        LOG_INFO("DATA channel established to peer %u", node_id);
-                    } else {
-                        LOG_ERROR("Failed to connect DATA channel to peer %u", node_id);
+
+                    // Retry connection a few times (worker might still be starting)
+                    int connected = 0;
+                    for (int retry = 0; retry < 3; retry++) {
+                        if (retry > 0) {
+                            LOG_DEBUG("Retrying DATA channel connection to peer %u (attempt %d/3)", 
+                                     node_id, retry + 1);
+                            usleep(500000);  // Wait 500ms between retries
+                        }
+                        
+                        if (rpc_client_connect(peer->data_channel, ip, data_port,
+                                              RPC_CHANNEL_DATA, 4096) == 0) {
+                            LOG_INFO("DATA channel established to peer %u", node_id);
+                            connected = 1;
+                            break;
+                        }
+                    }
+                    
+                    if (!connected) {
+                        LOG_WARN("Failed to connect DATA channel to peer %u after 3 attempts (will retry later)", 
+                                node_id);
                         safe_free(peer->data_channel);
                         peer->data_channel = NULL;
                     }
+
                 }
             }
             peer_pool_release(&node->peer_pool);
         }
     }
-    else if (strcmp(event_type, MEMBER_EVENT_FAILED) == 0 ||
-             strcmp(event_type, MEMBER_EVENT_LEAVE) == 0) {
-        LOG_WARN("Peer %u left/failed", node_id);
-        
+    else if (strcmp(event_type_str, MEMBER_EVENT_FAILED) == 0 ||
+             strcmp(event_type_str, MEMBER_EVENT_LEAVE) == 0) {
         peer_pool_update_status(&node->peer_pool, node_id, NODE_STATUS_DEAD);
-        
-        // TODO: Re-schedule executions assigned to this peer
     }
-    else if (strcmp(event_type, MEMBER_EVENT_UPDATE) == 0) {
-        LOG_DEBUG("Peer %u updated", node_id);
+}
+
+// ============================================================================
+// EVENT BUS SUBSCRIBERS
+// ============================================================================
+
+static void handle_peer_events(const event_t *event, void *user_data) {
+    unified_node_t *node = (unified_node_t*)user_data;
+    if (!node) return;
+    
+    const event_peer_t *peer_data = &event->data.peer;
+    
+    switch (event->type) {
+        case EVENT_TYPE_PEER_JOINED:
+            // Already handled in on_member_event (will refactor later)
+            break;
+            
+        case EVENT_TYPE_PEER_FAILED:
+        case EVENT_TYPE_PEER_LEFT:
+            peer_pool_update_status(&node->peer_pool, 
+                                   peer_data->node_id, 
+                                   NODE_STATUS_DEAD);
+            LOG_DEBUG("Event subscriber: Peer %u marked as DEAD", peer_data->node_id);
+            break;
+            
+        case EVENT_TYPE_PEER_SUSPECT:
+            peer_pool_update_status(&node->peer_pool,
+                                   peer_data->node_id,
+                                   NODE_STATUS_SUSPECT);
+            LOG_DEBUG("Event subscriber: Peer %u marked as SUSPECT", peer_data->node_id);
+            break;
+            
+        case EVENT_TYPE_PEER_UPDATED:
+            LOG_DEBUG("Event subscriber: Peer %u updated", peer_data->node_id);
+            break;
+            
+        default:
+            break;
     }
 }
 
@@ -108,6 +199,15 @@ int node_init(unified_node_t *node, const roole_config_t *config,
     }
     service_registry_set_global(registry);
 
+    // CREATE EVENT BUS
+    event_bus_t *event_bus = event_bus_create();
+    if (!event_bus) {
+        LOG_ERROR("Failed to create event bus");
+        service_registry_destroy(registry);
+        return RESULT_ERR_NOMEM;
+    }
+    service_registry_register(registry, SERVICE_TYPE_EVENT_BUS, "main", event_bus);
+    
     // Parse addresses
     char gossip_ip[16], data_ip[16], ingress_ip[16], metrics_ip[16];
     uint16_t gossip_port, data_port, ingress_port = 0, metrics_port = 0;
@@ -125,6 +225,7 @@ int node_init(unified_node_t *node, const roole_config_t *config,
     
     // Set basic fields
     node->node_id = config->node_id;
+    node->node_type = config->node_type;
     safe_strncpy(node->cluster_name, config->cluster_name, MAX_CONFIG_STRING);
     safe_strncpy(node->bind_addr, gossip_ip, MAX_IP_LEN);
     node->gossip_port = gossip_port;
@@ -187,7 +288,7 @@ int node_init(unified_node_t *node, const roole_config_t *config,
     }
     
     // Initialize membership (gossip protocol)
-    if (membership_init(&node->membership, node->node_id, NODE_TYPE_WORKER,
+    if (membership_init(&node->membership, node->node_id, node->node_type,
                        node->bind_addr, node->gossip_port, node->data_port) != RESULT_OK) {
         LOG_ERROR("Failed to initialize membership");
         cluster_view_destroy(&node->cluster_view);
@@ -203,6 +304,22 @@ int node_init(unified_node_t *node, const roole_config_t *config,
     membership_set_callback(node->membership, on_member_event, node);
     node->gossip_engine = ((struct membership_handle*)node->membership)->gossip_engine;
     
+    // SUBSCRIBE TO PEER EVENTS ON EVENT BUS
+    /*
+    event_bus_t *event_bus = (event_bus_t*)service_registry_get(registry,
+                                                                SERVICE_TYPE_EVENT_BUS,
+                                                                "main");
+    */
+   
+    if (event_bus) {
+        event_bus_subscribe(event_bus, EVENT_TYPE_PEER_JOINED, handle_peer_events, node);
+        event_bus_subscribe(event_bus, EVENT_TYPE_PEER_LEFT, handle_peer_events, node);
+        event_bus_subscribe(event_bus, EVENT_TYPE_PEER_FAILED, handle_peer_events, node);
+        event_bus_subscribe(event_bus, EVENT_TYPE_PEER_SUSPECT, handle_peer_events, node);
+        event_bus_subscribe(event_bus, EVENT_TYPE_PEER_UPDATED, handle_peer_events, node);
+        LOG_INFO("Subscribed to peer events on event bus");
+    }
+
     // Initialize metrics
     if (config->ports.metrics_addr[0] != '\0') {
         node_metrics_init(node, config->ports.metrics_addr);
@@ -329,6 +446,15 @@ void node_shutdown(unified_node_t *node) {
     peer_pool_destroy(&node->peer_pool);
     dag_catalog_destroy(&node->dag_catalog);
     
+    // Destroy event bus
+    event_bus_t *event_bus = (event_bus_t*)service_registry_get(registry, 
+                                                                SERVICE_TYPE_EVENT_BUS, 
+                                                                "main");
+    if (event_bus) {
+        event_bus_destroy(event_bus);
+        service_registry_unregister(registry, SERVICE_TYPE_EVENT_BUS, "main");
+    }
+
     // Destroy global registry
     if (registry) {
         service_registry_set_global(NULL);

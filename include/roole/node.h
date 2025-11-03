@@ -11,6 +11,7 @@
 #include "roole/gossip.h"
 #include "roole/metrics.h"
 #include "roole/metrics_server.h"
+#include "roole/event_bus.h"
 #include <pthread.h>
 
 #define MAX_WORKERS 256  // Legacy compatibility
@@ -131,6 +132,7 @@ typedef struct execution_tracker {
 typedef struct unified_node {
     // Identity
     node_id_t node_id;
+    node_type_t node_type;
     char cluster_name[MAX_CONFIG_STRING];
     char bind_addr[MAX_IP_LEN];
     

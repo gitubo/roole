@@ -5,6 +5,8 @@
 #include "roole/node.h"
 #include "roole/rpc.h"
 #include "roole/common.h"
+#include "roole/event_bus.h"
+#include "roole/service_registry.h"
 #include <string.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -82,6 +84,15 @@ int handle_submit_message(rpc_async_context_t *context,
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
+    // PUBLISH MESSAGE_RECEIVED EVENT
+    service_registry_t *registry = service_registry_global();
+    event_bus_t *event_bus = NULL;
+    if (registry) {
+        event_bus = (event_bus_t*)service_registry_get(registry,
+                                                        SERVICE_TYPE_EVENT_BUS,
+                                                        "main");
+    }
+
     // Route message
     if (target_peer == node->node_id) {
         // Process locally - enqueue
@@ -99,6 +110,23 @@ int handle_submit_message(rpc_async_context_t *context,
             return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
         }
         
+        if (event_bus) {
+            event_t event = {
+                .type = EVENT_TYPE_MESSAGE_RECEIVED,
+                .timestamp_ms = time_now_ms(),
+                .source_node_id = node->node_id,
+                .data.message = {
+                    .exec_id = exec_id,
+                    .dag_id = dag_id,
+                    .source_id = context->sender_id,
+                    .dest_id = node->node_id,
+                    .message_size = message_len,
+                    .timestamp_ms = time_now_ms()
+                }
+            };
+            event_bus_publish(event_bus, &event);
+        }
+
         LOG_INFO("[RPC] Message enqueued locally (exec_id: %lu)", exec_id);
     } else {
         // Send to remote peer
@@ -145,6 +173,24 @@ int handle_submit_message(rpc_async_context_t *context,
             LOG_ERROR("Failed to send message to peer %u", target_peer);
             execution_tracker_update_status(&node->exec_tracker, exec_id, EXEC_STATUS_FAILED);
             return rpc_send_async_response(context, RPC_STATUS_NETWORK, NULL, 0);
+        }
+
+        // PUBLISH MESSAGE_ROUTED EVENT
+        if (event_bus) {
+            event_t event = {
+                .type = EVENT_TYPE_MESSAGE_ROUTED,
+                .timestamp_ms = time_now_ms(),
+                .source_node_id = node->node_id,
+                .data.message = {
+                    .exec_id = exec_id,
+                    .dag_id = dag_id,
+                    .source_id = node->node_id,
+                    .dest_id = target_peer,
+                    .message_size = message_len,
+                    .timestamp_ms = time_now_ms()
+                }
+            };
+            event_bus_publish(event_bus, &event);
         }
         
         LOG_INFO("[RPC] Message routed to peer %u (exec_id: %lu)", target_peer, exec_id);

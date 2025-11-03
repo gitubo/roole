@@ -8,53 +8,13 @@ global:
     environment: 'prod'
 
 scrape_configs:
-  # Ingress nodes (router capability)
-  - job_name: 'roole_ingress'
+  - job_name: 'roole'
     metrics_path: '/metrics'
     static_configs:
       - targets:
-          - 'node1.example.com:7002'
-          - 'node2.example.com:7002'
-        labels:
-          role: 'ingress'
-          capability: 'router'
-    
-    metric_relabel_configs:
-      # Only scrape from nodes with node_type="router"
-      - source_labels: [node_type]
-        regex: 'router'
-        action: keep
-
-  # Compute nodes (worker capability)
-  - job_name: 'roole_compute'
-    metrics_path: '/metrics'
-    static_configs:
-      - targets:
-          - 'node100.example.com:7102'
-          - 'node101.example.com:7102'
-          - 'node200.example.com:7202'
-          - 'node201.example.com:7202'
-        labels:
-          role: 'compute'
-          capability: 'worker'
-    
-    metric_relabel_configs:
-      # Only scrape from nodes with node_type="worker"
-      - source_labels: [node_type]
-        regex: 'worker'
-        action: keep
-
-  # All nodes (unified view)
-  - job_name: 'roole_cluster'
-    metrics_path: '/metrics'
-    static_configs:
-      - targets:
-          - 'node1.example.com:7002'
-          - 'node2.example.com:7002'
-          - 'node100.example.com:7102'
-          - 'node101.example.com:7102'
-          - 'node200.example.com:7202'
-          - 'node201.example.com:7202'
+          - 'roole:7002'
+          - 'roole:7102'
+          - 'roole:7202'
 
 alerting:
   alertmanagers:

@@ -15,7 +15,8 @@
 // ============================================================================
 
 #define LOG_BUFFER_SIZE 4096
-#define FLUSH_INTERVAL_MS 100
+#define FLUSH_INTERVAL_MS 10
+#define CRITICAL_BUFFER_THRESHOLD 3072
 
 // ============================================================================
 // THREAD-LOCAL LOG BUFFER
@@ -78,7 +79,7 @@ static void flush_buffer(log_buffer_t *buf) {
     pthread_mutex_lock(&buf->lock);
     if (buf->used > 0) {
         fwrite(buf->data, 1, buf->used, stdout);
-        fflush(stdout);
+        fflush(stdout);  
         buf->used = 0;
     }
     pthread_mutex_unlock(&buf->lock);
@@ -197,7 +198,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
     pthread_mutex_lock(&buf->lock);
     
     // Check if buffer needs emergency flush
-    if (buf->used > LOG_BUFFER_SIZE - 512) {
+    if (buf->used > CRITICAL_BUFFER_THRESHOLD) {
         fwrite(buf->data, 1, buf->used, stdout);
         fflush(stdout);
         buf->used = 0;
@@ -224,7 +225,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
                             file, line);
         } else {
             written = snprintf(buf->data + buf->used, LOG_BUFFER_SIZE - buf->used,
-                            "[%s][%s][node:%u][%s]tid:%04lx[%s:%d] ",
+                            "[%s][%s][node:%u][%s][tid:%04lx][%s:%d] ",
                             timestamp, level_to_string(level),
                             g_log_context.node_id, g_log_context.cluster_name,
                             thread_id % 0xFFFF,
@@ -232,7 +233,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
         }
     } else {
         written = snprintf(buf->data + buf->used, LOG_BUFFER_SIZE - buf->used,
-                        "[%s][%s]tid:%04lx[%s:%d] ",
+                        "[%s][%s][tid:%04lx][%s:%d] ",
                         timestamp, level_to_string(level), thread_id % 0xFFFF,
                         file, line);
     }

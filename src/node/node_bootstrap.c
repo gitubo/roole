@@ -146,6 +146,18 @@ int node_bootstrap_from_config(unified_node_t *node, const roole_config_t *confi
     
     LOG_INFO("Received JOIN_RESPONSE from node %u", response.sender_id);
     
+    // ADD: Log what we received
+    LOG_INFO("[BOOTSTRAP] JOIN_RESPONSE details:");
+    LOG_INFO("[BOOTSTRAP]   sender: %u", response.sender_id);
+    LOG_INFO("[BOOTSTRAP]   updates: %u", response.num_updates);
+    
+    for (uint8_t i = 0; i < response.num_updates; i++) {
+        LOG_INFO("[BOOTSTRAP]   update[%u]: node=%u type=%d status=%d ip=%s:%u",
+                i, response.updates[i].node_id, response.updates[i].node_type,
+                response.updates[i].status, response.updates[i].ip_address,
+                response.updates[i].gossip_port);
+    }
+    
     // Parse bootstrap data (list of seed peers)
     gossip_bootstrap_response_t bootstrap_data;
     size_t header_size = 16 + response.num_updates * 44;

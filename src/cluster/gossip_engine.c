@@ -294,6 +294,12 @@ static void handle_ping_message(gossip_engine_t *engine,
     // Process ALL piggyback updates
     for (uint8_t i = 0; i < msg->num_updates; i++) {
         const gossip_member_update_t *upd = &msg->updates[i];
+
+        LOG_DEBUG("[GOSSIP] Processing update %u/%u: node_id=%u type=%d status=%d ip=%s gossip=%u data=%u inc=%lu",
+                 i+1, msg->num_updates,
+                 upd->node_id, upd->node_type, upd->status,
+                 upd->ip_address, upd->gossip_port, upd->data_port,
+                 upd->incarnation);
         
         cluster_member_t *existing = cluster_view_get(engine->cluster_view, upd->node_id);
         
@@ -451,6 +457,8 @@ static void handle_ack_message(gossip_engine_t *engine,
     LOG_DEBUG("Received ACK from node %u (%s:%u, updates=%u)", 
               msg->sender_id, src_ip, src_port, msg->num_updates);
     
+    LOG_DEBUG("[GOSSIP] ACK contains %u updates", msg->num_updates);
+
     remove_pending_ack(engine, msg->sender_id);
     
     // Check if sender was suspect
@@ -761,7 +769,7 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         
         // Immediate gossip burst to all existing members
         pthread_rwlock_rdlock(&engine->cluster_view->lock);
-        
+
         for (size_t i = 0; i < engine->cluster_view->count; i++) {
             cluster_member_t *peer = &engine->cluster_view->members[i];
             
@@ -805,10 +813,16 @@ static void handle_worker_join_message(gossip_engine_t *engine,
     memset(&bootstrap_resp, 0, sizeof(bootstrap_resp));
     
     pthread_rwlock_rdlock(&engine->cluster_view->lock);
+
+    LOG_INFO("[JOIN_RESPONSE] Building bootstrap response for worker %u", msg->sender_id);
+    LOG_INFO("[JOIN_RESPONSE] Current cluster view has %zu members", engine->cluster_view->count);
     
     for (size_t i = 0; i < engine->cluster_view->count; i++) {
         cluster_member_t *m = &engine->cluster_view->members[i];
         
+        LOG_DEBUG("[JOIN_RESPONSE] Evaluating member %u: type=%d status=%d",
+                 m->node_id, m->node_type, m->status);
+
         if (m->node_type == NODE_TYPE_ROUTER && 
             m->status == NODE_STATUS_ALIVE &&
             bootstrap_resp.num_routers < MAX_CONFIG_ROUTERS) {
@@ -1386,6 +1400,11 @@ static void* gossip_protocol_thread(void *arg) {
             LOG_INFO("Cluster state: %zu members (%zu alive, %zu suspect, %zu dead)",
                      total, alive_count, suspect_count, dead_count);
             
+            // ADD FULL CLUSTER VIEW DUMP FOR DEBUGGING
+            //char label[64];
+            //snprintf(label, sizeof(label), "Round %lu", round);
+            //cluster_view_dump(engine->cluster_view, label);
+
             // Sanity check
             if (alive_count + suspect_count + dead_count != total) {
                 LOG_ERROR("Cluster state inconsistency detected! Total=%zu but sum=%zu",

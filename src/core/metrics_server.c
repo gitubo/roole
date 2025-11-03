@@ -247,6 +247,13 @@ static int setup_server_socket(const char *bind_addr, uint16_t port) {
     }
 #endif
     
+    // IMPORTANT: Set socket to non-blocking BEFORE listen
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    if (flags >= 0) {
+        // DON'T set non-blocking yet - do it AFTER listen
+        // fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);  // REMOVE THIS
+    }
+    
     // Prepare address structure
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -299,7 +306,7 @@ static void* metrics_server_thread_fn(void *arg) {
     LOG_INFO("Metrics server ready at http://%s:%u/metrics",
              server->bind_addr, server->port);
     
-    // Set socket to non-blocking for graceful shutdown
+    // NOW set socket to non-blocking (AFTER listen succeeds)
     int flags = fcntl(server->server_fd, F_GETFL, 0);
     if (flags >= 0) {
         fcntl(server->server_fd, F_SETFL, flags | O_NONBLOCK);

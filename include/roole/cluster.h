@@ -69,6 +69,9 @@ size_t cluster_view_list_by_type(cluster_view_t *view, node_type_t type,
 size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
                                node_id_t *out_node_ids, size_t max_count);
 
+// Debug helper
+void cluster_view_dump(cluster_view_t *view, const char *label);
+
 // ============================================================================
 // MEMBERSHIP (Gossip Protocol Wrapper)
 // ============================================================================
