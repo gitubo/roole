@@ -24,6 +24,10 @@ void* node_executor_thread_fn(void *arg) {
     
     while (!node->shutdown_flag) {
         message_t message;
+
+        // Record queue pop time
+        struct timespec queue_pop_time;
+        timespec_now(&queue_pop_time);
         
         // Pop message from queue (1 second timeout)
         int ret = message_queue_pop(&node->message_queue, &message, 1000);
@@ -73,9 +77,25 @@ void* node_executor_thread_fn(void *arg) {
             event_bus_publish(event_bus, &event);
         }
 
+        // Calculate queue wait time
+        if (node->histogram_queue_wait) {
+            uint64_t wait_ms = time_now_ms() - message.received_at_ms;
+            metrics_histogram_observe(node->histogram_queue_wait, (double)wait_ms);
+        }
+        
+        // Record message size
+        if (node->histogram_message_size) {
+            metrics_histogram_observe(node->histogram_message_size, 
+                                     (double)message.message_len);
+        }
+
         // Increment active executions
         __sync_fetch_and_add(&node->active_executions, 1);
         
+        // Record execution start time
+        struct timespec exec_start_time;
+        timespec_now(&exec_start_time);
+
         if (node->metric_active_executions) {
             metrics_gauge_set(node->metric_active_executions, 
                             (double)node->active_executions);
@@ -117,6 +137,17 @@ void* node_executor_thread_fn(void *arg) {
         
         if (exec_ctx.output_data) {
             int exec_result = dag_execute(&exec_ctx);
+
+            // Calculate execution duration
+            struct timespec exec_end_time;
+            timespec_now(&exec_end_time);
+            double exec_duration_us = time_diff_us(&exec_start_time, &exec_end_time);
+            
+            // Record execution duration in histogram
+            if (node->histogram_exec_duration) {
+                double exec_duration_ms = exec_duration_us / 1000.0;
+                metrics_histogram_observe(node->histogram_exec_duration, exec_duration_ms);
+            }
             
             if (exec_result == RESULT_OK) {
                 status = EXEC_STATUS_COMPLETED;

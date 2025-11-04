@@ -706,41 +706,65 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         return;
     }
     
-    // Check if this is a rejoining node (was previously DEAD)
+    // CRITICAL FIX: Check if this is a rejoining node
     cluster_member_t *existing = cluster_view_get(engine->cluster_view, msg->sender_id);
     int is_rejoin = false;
     uint64_t new_incarnation = 0;
+    node_status_t old_status = NODE_STATUS_ALIVE;
     
     if (existing) {
-        is_rejoin = (existing->status == NODE_STATUS_DEAD);
-        new_incarnation = existing->incarnation + 1; // Bump incarnation on rejoin
+        old_status = existing->status;
+        is_rejoin = (existing->status == NODE_STATUS_DEAD || 
+                     existing->status == NODE_STATUS_SUSPECT);
+        
+        // IMPORTANT: Bump incarnation on rejoin to invalidate old gossip
+        new_incarnation = existing->incarnation + 1;
+        
         cluster_view_release(engine->cluster_view);
         
         if (is_rejoin) {
-            LOG_INFO("Node %u is REJOINING (was DEAD, new incarnation=%lu)", 
-                     msg->sender_id, new_incarnation);
+            LOG_INFO("Node %u is REJOINING (was %s, new incarnation=%lu)", 
+                     msg->sender_id, 
+                     old_status == NODE_STATUS_DEAD ? "DEAD" : "SUSPECT",
+                     new_incarnation);
+        } else {
+            LOG_DEBUG("Node %u already in cluster (status=%d), updating", 
+                      msg->sender_id, old_status);
         }
+    } else {
+        LOG_INFO("Node %u is a NEW member joining", msg->sender_id);
+        new_incarnation = 0; // First join, start at incarnation 0
     }
     
-    // Add/Update worker in cluster view
+    // Process join request
     if (msg->num_updates > 0) {
         const gossip_member_update_t *upd = &msg->updates[0];
         
+        // Build member record with correct incarnation
         cluster_member_t member = {
             .node_id = upd->node_id,
             .node_type = NODE_TYPE_WORKER,
             .gossip_port = upd->gossip_port,
             .data_port = upd->data_port,
             .status = NODE_STATUS_ALIVE,
-            .incarnation = is_rejoin ? new_incarnation : upd->incarnation
+            .incarnation = is_rejoin ? new_incarnation : upd->incarnation,
+            .last_seen_ms = time_now_ms()
         };
         safe_strncpy(member.ip_address, src_ip, MAX_IP_LEN);
         
-        // This will either add or update (handling rejoin case)
-        cluster_view_add(engine->cluster_view, &member);
+        // ADD OR UPDATE: cluster_view_add handles both cases now
+        int result = cluster_view_add(engine->cluster_view, &member);
         
-        LOG_INFO("Worker %u joined cluster (incarnation=%lu)", 
-                 upd->node_id, member.incarnation);
+        if (result == RESULT_OK) {
+            LOG_INFO("Worker %u %s cluster (incarnation=%lu)", 
+                     upd->node_id, 
+                     is_rejoin ? "REJOINED" : "joined",
+                     member.incarnation);
+        } else {
+            LOG_ERROR("Failed to add/update worker %u in cluster view (error=%d)",
+                      upd->node_id, result);
+            // Don't return early - still send JOIN_RESPONSE
+        }
         
         // Trigger event callback
         if (engine->event_callback) {
@@ -750,20 +774,21 @@ static void handle_worker_join_message(gossip_engine_t *engine,
                                  event, engine->event_callback_data);
         }
         
-        // Propagate join/rejoin to cluster with correct incarnation
+        // Propagate join/rejoin to cluster
         gossip_member_update_t join_update = {
             .node_id = upd->node_id,
             .node_type = NODE_TYPE_WORKER,
             .status = NODE_STATUS_ALIVE,
-            .incarnation = member.incarnation, // Use the correct (possibly bumped) incarnation
+            .incarnation = member.incarnation, // Use bumped incarnation
             .gossip_port = upd->gossip_port,
             .data_port = upd->data_port,
             .timestamp_ms = time_now_ms()
         };
         safe_strncpy(join_update.ip_address, src_ip, MAX_IP_LEN);
         
-        // Queue for background gossip (5x for redundancy)
-        for (int i = 0; i < 5; i++) {
+        // Queue for background gossip (increased redundancy for rejoins)
+        int propagation_count = is_rejoin ? 10 : 5;
+        for (int i = 0; i < propagation_count; i++) {
             update_queue_push(&engine->update_queue, &join_update);
         }
         
@@ -797,32 +822,28 @@ static void handle_worker_join_message(gossip_engine_t *engine,
             if (msg_size > 0) {
                 gossip_send_udp(engine->udp_socket, buffer, msg_size,
                                peer->ip_address, peer->gossip_port);
-                LOG_INFO("Immediately gossiped Worker %u %s to node %u", 
+                LOG_DEBUG("Immediately gossiped Worker %u %s to node %u", 
                          upd->node_id, is_rejoin ? "rejoin" : "join", peer->node_id);
             }
         }
         
         pthread_rwlock_unlock(&engine->cluster_view->lock);
         
-        LOG_INFO("%s propagation initiated for Worker %u", 
+        LOG_INFO("%s propagation completed for Worker %u", 
                  is_rejoin ? "Rejoin" : "Join", upd->node_id);
     }
     
-    // Build bootstrap response with list of active ROUTERS
+    // Build bootstrap response (unchanged)
     gossip_bootstrap_response_t bootstrap_resp;
     memset(&bootstrap_resp, 0, sizeof(bootstrap_resp));
     
     pthread_rwlock_rdlock(&engine->cluster_view->lock);
 
-    LOG_INFO("[JOIN_RESPONSE] Building bootstrap response for worker %u", msg->sender_id);
-    LOG_INFO("[JOIN_RESPONSE] Current cluster view has %zu members", engine->cluster_view->count);
+    LOG_DEBUG("[JOIN_RESPONSE] Building bootstrap response for worker %u", msg->sender_id);
     
     for (size_t i = 0; i < engine->cluster_view->count; i++) {
         cluster_member_t *m = &engine->cluster_view->members[i];
         
-        LOG_DEBUG("[JOIN_RESPONSE] Evaluating member %u: type=%d status=%d",
-                 m->node_id, m->node_type, m->status);
-
         if (m->node_type == NODE_TYPE_ROUTER && 
             m->status == NODE_STATUS_ALIVE &&
             bootstrap_resp.num_routers < MAX_CONFIG_ROUTERS) {
@@ -844,7 +865,7 @@ static void handle_worker_join_message(gossip_engine_t *engine,
     LOG_INFO("Sending JOIN_RESPONSE with %u routers to worker %u", 
              bootstrap_resp.num_routers, msg->sender_id);
     
-    // Build JOIN_RESPONSE message
+    // Send JOIN_RESPONSE (unchanged)
     gossip_message_t response = {
         .version = 1,
         .msg_type = GOSSIP_MSG_JOIN_RESPONSE,
@@ -855,11 +876,7 @@ static void handle_worker_join_message(gossip_engine_t *engine,
     };
     
     uint8_t buffer[GOSSIP_MAX_PAYLOAD_SIZE];
-    
-    // Serialize gossip message header
     ssize_t msg_size = gossip_message_serialize(&response, buffer, sizeof(buffer));
-    
-    // Append bootstrap data
     ssize_t bootstrap_size = gossip_serialize_bootstrap_response(&bootstrap_resp, 
                                                                  buffer + msg_size,
                                                                  sizeof(buffer) - msg_size);
@@ -869,8 +886,8 @@ static void handle_worker_join_message(gossip_engine_t *engine,
         
         if (gossip_send_udp(engine->udp_socket, buffer, total_size, 
                            src_ip, src_port) > 0) {
-            LOG_INFO("Sent JOIN_RESPONSE to worker %u (%s:%u) with %u routers", 
-                     msg->sender_id, src_ip, src_port, bootstrap_resp.num_routers);
+            LOG_INFO("Sent JOIN_RESPONSE to worker %u (%s:%u)", 
+                     msg->sender_id, src_ip, src_port);
         } else {
             LOG_ERROR("Failed to send JOIN_RESPONSE to worker %u", msg->sender_id);
         }

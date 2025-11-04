@@ -7,6 +7,7 @@
 #include "roole/common.h"
 #include "roole/event_bus.h"
 #include "roole/service_registry.h"
+#include "roole/metrics.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -53,13 +54,12 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
     // Determine node_type label based on capabilities
     const char *node_type_label = node->capabilities.has_ingress ? "router" : "worker";
     
+    // Create standard labels (reuse from existing code)
     metric_label_t labels[3];
     safe_strncpy(labels[0].name, "cluster_name", MAX_LABEL_NAME_LEN);
     safe_strncpy(labels[0].value, node->cluster_name, MAX_LABEL_VALUE_LEN);
-    
     safe_strncpy(labels[1].name, "node_id", MAX_LABEL_NAME_LEN);
     safe_strncpy(labels[1].value, node_id_str, MAX_LABEL_VALUE_LEN);
-    
     safe_strncpy(labels[2].name, "node_type", MAX_LABEL_NAME_LEN);
     safe_strncpy(labels[2].value, node_type_label, MAX_LABEL_VALUE_LEN);
     
@@ -135,7 +135,46 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
         "Number of dead cluster members",
         3, labels
     );
+
+    // CREATE HISTOGRAM METRICS (NEW)
     
+    // Execution duration (milliseconds)
+    node->histogram_exec_duration = metrics_get_or_create_histogram(
+        node->metrics_registry,
+        "execution_duration_ms",
+        "Histogram of message execution duration in milliseconds",
+        HISTOGRAM_BUCKETS_LATENCY_MS,
+        3, labels
+    );
+    
+    // Queue wait time (milliseconds)
+    node->histogram_queue_wait = metrics_get_or_create_histogram(
+        node->metrics_registry,
+        "message_queue_wait_ms",
+        "Histogram of time messages spend in queue before processing",
+        HISTOGRAM_BUCKETS_LATENCY_MS,
+        3, labels
+    );
+    
+    // Message size (bytes)
+    node->histogram_message_size = metrics_get_or_create_histogram(
+        node->metrics_registry,
+        "message_size_bytes",
+        "Histogram of message sizes in bytes",
+        HISTOGRAM_BUCKETS_SIZE_BYTES,
+        3, labels
+    );
+    
+    // Gossip round-trip time (microseconds)
+    node->histogram_gossip_rtt = metrics_get_or_create_histogram(
+        node->metrics_registry,
+        "gossip_rtt_us",
+        "Histogram of gossip PING/ACK round-trip time in microseconds",
+        HISTOGRAM_BUCKETS_LATENCY_US,
+        3, labels
+    );
+    
+   
     LOG_INFO("All metrics created with standard labels (cluster_name, node_id, node_type)");
     
     // Start HTTP server

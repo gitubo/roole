@@ -10,33 +10,6 @@
 #include <stdio.h>
 #include <pthread.h>
 
-// ============================================================================
-// INTERNAL STRUCTURES
-// ============================================================================
-
-#define MAX_METRIC_NAME_LEN 128
-#define MAX_METRIC_HELP_LEN 256
-#define MAX_METRICS_PER_REGISTRY 256
-
-struct metrics {
-    char name[MAX_METRIC_NAME_LEN];
-    char help[MAX_METRIC_HELP_LEN];
-    metric_type_t type;
-    
-    metric_label_t labels[MAX_LABELS_PER_METRIC];
-    size_t num_labels;
-    
-    double value;
-    pthread_mutex_t lock;
-    
-    int active;
-};
-
-struct metrics_registry {
-    metrics_t metrics[MAX_METRICS_PER_REGISTRY];
-    size_t count;
-    pthread_mutex_t lock;
-};
 
 // ============================================================================
 // REGISTRY MANAGEMENT

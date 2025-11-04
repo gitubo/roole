@@ -177,6 +177,29 @@ static void* node_cleanup_thread_fn(void *arg) {
     return NULL;
 }
 
+
+static void* node_metrics_update_thread_fn(void *arg) {
+    unified_node_t *node = (unified_node_t*)arg;
+    logger_push_component("metrics:updater");
+    LOG_INFO("Node metrics update thread started");
+    
+    while (!node->shutdown_flag) {
+        // Update metrics every 10 seconds
+        sleep(10);
+        
+        if (node->shutdown_flag) break;
+        
+        // Update all periodic metrics
+        node_metrics_update_periodic(node);
+        
+        LOG_DEBUG("Periodic metrics updated");
+    }
+    
+    LOG_INFO("Node metrics update thread stopped");
+    logger_pop_component();
+    return NULL;
+}
+
 // ============================================================================
 // UNIFIED NODE INITIALIZATION
 // ============================================================================
@@ -370,12 +393,27 @@ int node_start(unified_node_t *node) {
     
     LOG_INFO("Cleanup thread started");
     
+    // START METRICS UPDATE THREAD (NEW)
+    if (node->metrics_registry) {
+        if (pthread_create(&node->metrics_update_thread, NULL,
+                          node_metrics_update_thread_fn, node) != 0) {
+            LOG_ERROR("Failed to start metrics update thread");
+            node->shutdown_flag = 1;
+            pthread_join(node->cleanup_thread, NULL);
+            return RESULT_ERR_INVALID;
+        }
+        LOG_INFO("Metrics update thread started");
+    }
+
     // Start executor threads (if can execute)
     if (node->capabilities.can_execute) {
         if (node_start_executors(node) != RESULT_OK) {
             LOG_ERROR("Failed to start executor threads");
             node->shutdown_flag = 1;
             pthread_join(node->cleanup_thread, NULL);
+            if (node->metrics_registry) {
+                pthread_join(node->metrics_update_thread, NULL);
+            }
             return RESULT_ERR_INVALID;
         }
         LOG_INFO("Started %zu executor threads", node->num_executor_threads);
@@ -395,55 +433,141 @@ void node_shutdown(unified_node_t *node) {
     if (!node) return;
     
     LOG_INFO("========================================");
-    LOG_INFO("Shutting down node %u", node->node_id);
+    LOG_INFO("Initiating graceful shutdown for node %u", node->node_id);
     LOG_INFO("========================================");
     
-    // Set shutdown flag
+    // PHASE 1: Stop accepting new work
+    LOG_INFO("[Shutdown Phase 1/6] Stopping RPC servers...");
+    // RPC server will see shutdown_flag and stop accepting connections
     node->shutdown_flag = 1;
     
-    // Unregister from service registry
+    // Unregister from service registry immediately
     service_registry_t *registry = service_registry_global();
     if (registry) {
         service_registry_unregister(registry, SERVICE_TYPE_NODE_STATE, "unified_node");
     }
-
-    // Stop executor threads
-    if (node->executor_threads && node->capabilities.can_execute) {
-        LOG_INFO("Stopping executor threads...");
-        node_stop_executors(node);
+    
+    // PHASE 2: Drain message queue (if can execute)
+    if (node->capabilities.can_execute) {
+        LOG_INFO("[Shutdown Phase 2/6] Draining message queue...");
+        
+        int drain_attempts = 0;
+        const int MAX_DRAIN_SECONDS = 10;
+        
+        while (drain_attempts < MAX_DRAIN_SECONDS) {
+            size_t queue_size = message_queue_size(&node->message_queue);
+            
+            if (queue_size == 0) {
+                LOG_INFO("Message queue drained successfully");
+                break;
+            }
+            
+            LOG_INFO("Waiting for queue to drain: %zu messages remaining", queue_size);
+            sleep(1);
+            drain_attempts++;
+        }
+        
+        size_t final_queue_size = message_queue_size(&node->message_queue);
+        if (final_queue_size > 0) {
+            LOG_WARN("Message queue not fully drained: %zu messages lost", 
+                     final_queue_size);
+        }
+    } else {
+        LOG_INFO("[Shutdown Phase 2/6] No message queue (skipped)");
     }
     
-    // Wait for cleanup thread
-    LOG_INFO("Stopping cleanup thread...");
-    pthread_join(node->cleanup_thread, NULL);
+    // PHASE 3: Wait for active executions to complete
+    LOG_INFO("[Shutdown Phase 3/6] Waiting for active executions to complete...");
     
-    // Gracefully leave cluster
-    if (node->membership) {
-        LOG_INFO("Leaving cluster...");
-        membership_leave(node->membership);
-        sleep(1);  // Give time for LEAVE message to propagate
+    int exec_wait_attempts = 0;
+    const int MAX_EXEC_WAIT_SECONDS = 30;
+    
+    while (exec_wait_attempts < MAX_EXEC_WAIT_SECONDS) {
+        uint32_t active = node->active_executions;
         
+        if (active == 0) {
+            LOG_INFO("All executions completed");
+            break;
+        }
+        
+        LOG_INFO("Waiting for executions: %u active", active);
+        sleep(1);
+        exec_wait_attempts++;
+    }
+    
+    if (node->active_executions > 0) {
+        LOG_WARN("Shutdown timeout: %u executions still active (will be terminated)",
+                 node->active_executions);
+    }
+    
+    // PHASE 4: Stop worker threads
+    LOG_INFO("[Shutdown Phase 4/6] Stopping worker threads...");
+    
+    if (node->executor_threads && node->capabilities.can_execute) {
+        LOG_DEBUG("Stopping executor threads...");
+        node_stop_executors(node);
+        LOG_INFO("Executor threads stopped");
+    }
+    
+    if (node->metrics_registry) {
+        LOG_DEBUG("Stopping metrics update thread...");
+        pthread_join(node->metrics_update_thread, NULL);
+        LOG_INFO("Metrics update thread stopped");
+    }
+    
+    LOG_DEBUG("Stopping cleanup thread...");
+    pthread_join(node->cleanup_thread, NULL);
+    LOG_INFO("Cleanup thread stopped");
+    
+    // PHASE 5: Gracefully leave cluster
+    LOG_INFO("[Shutdown Phase 5/6] Leaving cluster...");
+    
+    if (node->membership) {
+        // Send LEAVE message to all peers
+        membership_leave(node->membership);
+        
+        // Wait for LEAVE propagation
+        LOG_DEBUG("Waiting 2 seconds for LEAVE propagation...");
+        sleep(2);
+        
+        // Shutdown membership/gossip
         membership_shutdown(node->membership);
         node->membership = NULL;
+        LOG_INFO("Left cluster gracefully");
     }
     
-    // Shutdown metrics
+    // PHASE 6: Cleanup resources and flush logs/metrics
+    LOG_INFO("[Shutdown Phase 6/6] Cleaning up resources...");
+    
+    // Final metrics update before shutdown
+    if (node->metrics_registry) {
+        LOG_DEBUG("Final metrics update...");
+        node_metrics_update_periodic(node);
+    }
+    
+    // Shutdown metrics (flushes final metrics)
     if (node->metrics_server || node->metrics_registry) {
-        LOG_INFO("Shutting down metrics...");
+        LOG_DEBUG("Shutting down metrics server...");
         node_metrics_shutdown(node);
+        LOG_INFO("Metrics server stopped");
     }
     
-    // Cleanup resources
-    LOG_INFO("Cleaning up resources...");
-    
+    // Cleanup data structures
+    LOG_DEBUG("Destroying cluster view...");
     cluster_view_destroy(&node->cluster_view);
     
     if (node->capabilities.can_execute) {
+        LOG_DEBUG("Destroying message queue...");
         message_queue_destroy(&node->message_queue);
     }
     
+    LOG_DEBUG("Destroying execution tracker...");
     execution_tracker_destroy(&node->exec_tracker);
+    
+    LOG_DEBUG("Destroying peer pool...");
     peer_pool_destroy(&node->peer_pool);
+    
+    LOG_DEBUG("Destroying DAG catalog...");
     dag_catalog_destroy(&node->dag_catalog);
     
     // Destroy event bus
@@ -451,6 +575,7 @@ void node_shutdown(unified_node_t *node) {
                                                                 SERVICE_TYPE_EVENT_BUS, 
                                                                 "main");
     if (event_bus) {
+        LOG_DEBUG("Destroying event bus...");
         event_bus_destroy(event_bus);
         service_registry_unregister(registry, SERVICE_TYPE_EVENT_BUS, "main");
     }
@@ -464,42 +589,7 @@ void node_shutdown(unified_node_t *node) {
     LOG_INFO("========================================");
     LOG_INFO("Node %u shutdown complete", node->node_id);
     LOG_INFO("========================================");
+    
+    // Flush all logs
     logger_flush();
-
 }
-
-// ============================================================================
-// BOOTSTRAP FROM CONFIG
-// ============================================================================
-/*
-int node_bootstrap(unified_node_t *node, const roole_config_t *config) {
-    if (!node || !config || config->router_count == 0) {
-        LOG_WARN("No seed routers configured for bootstrap");
-        return RESULT_OK;
-    }
-    
-    // Select random seed router
-    size_t router_idx = rand() % config->router_count;
-    const char *router_addr = config->routers[router_idx];
-    
-    char router_ip[16];
-    uint16_t router_gossip_port;
-    config_parse_address(router_addr, router_ip, &router_gossip_port);
-    
-    LOG_INFO("Bootstrapping from seed router %s:%u", router_ip, router_gossip_port);
-    
-    // Add seed to gossip engine
-    if (gossip_engine_add_seed(node->gossip_engine, router_ip, router_gossip_port) != 0) {
-        LOG_ERROR("Failed to add seed router");
-        return RESULT_ERR_NETWORK;
-    }
-    
-    // Announce join
-    gossip_engine_announce_join(node->gossip_engine);
-    
-    LOG_INFO("Bootstrap complete, waiting for cluster membership...");
-    sleep(2);  // Give time for gossip to propagate
-    
-    return RESULT_OK;
-}
-*/

@@ -8,6 +8,13 @@
 #include <stdint.h>
 #include <pthread.h>
 
+#define MAX_METRIC_NAME_LEN 128
+#define MAX_METRIC_HELP_LEN 256
+#define MAX_METRICS_PER_REGISTRY 256
+#define MAX_LABEL_NAME_LEN 64
+#define MAX_LABEL_VALUE_LEN 128
+#define MAX_LABELS_PER_METRIC 8
+
 // ============================================================================
 // METRIC TYPES
 // ============================================================================
@@ -17,25 +24,107 @@ typedef enum {
     METRIC_TYPE_GAUGE = 1
 } metric_type_t;
 
-// ============================================================================
-// METRIC LABEL
-// ============================================================================
-
-#define MAX_LABEL_NAME_LEN 64
-#define MAX_LABEL_VALUE_LEN 128
-#define MAX_LABELS_PER_METRIC 8
-
 typedef struct metric_label {
     char name[MAX_LABEL_NAME_LEN];
     char value[MAX_LABEL_VALUE_LEN];
 } metric_label_t;
 
 // ============================================================================
-// METRIC STRUCTURE (opaque to users)
+// INTERNAL STRUCTURES
 // ============================================================================
 
-typedef struct metrics metrics_t;
-typedef struct metrics_registry metrics_registry_t;
+typedef struct metrics {
+    char name[MAX_METRIC_NAME_LEN];
+    char help[MAX_METRIC_HELP_LEN];
+    metric_type_t type;
+    
+    metric_label_t labels[MAX_LABELS_PER_METRIC];
+    size_t num_labels;
+    
+    double value;
+    pthread_mutex_t lock;
+    
+    int active;
+} metrics_t;
+
+typedef struct metrics_registry {
+    metrics_t metrics[MAX_METRICS_PER_REGISTRY];
+    size_t count;
+    pthread_mutex_t lock;
+} metrics_registry_t;
+
+// ============================================================================
+// HISTOGRAM CONFIGURATION
+// ============================================================================
+
+#define HISTOGRAM_MAX_BUCKETS 16
+
+// Predefined bucket configurations
+typedef enum {
+    HISTOGRAM_BUCKETS_LATENCY_MS,     // 1, 5, 10, 50, 100, 500, 1000, 5000, +Inf
+    HISTOGRAM_BUCKETS_LATENCY_US,     // 100, 500, 1000, 5000, 10000, 50000, 100000, +Inf
+    HISTOGRAM_BUCKETS_SIZE_BYTES,     // 256, 1K, 4K, 16K, 64K, 256K, 1M, 4M, +Inf
+    HISTOGRAM_BUCKETS_CUSTOM
+} histogram_buckets_type_t;
+
+typedef struct histogram_buckets {
+    double upper_bounds[HISTOGRAM_MAX_BUCKETS];
+    size_t count;
+} histogram_buckets_t;
+
+// ============================================================================
+// HISTOGRAM STRUCTURE
+// ============================================================================
+
+typedef struct histogram_metric {
+    char name[MAX_METRIC_NAME_LEN];
+    char help[MAX_METRIC_HELP_LEN];
+    
+    metric_label_t labels[MAX_LABELS_PER_METRIC];
+    size_t num_labels;
+    
+    histogram_buckets_t buckets;
+    
+    // Bucket counters (atomic)
+    _Atomic uint64_t bucket_counts[HISTOGRAM_MAX_BUCKETS];
+    _Atomic uint64_t count;
+    _Atomic double sum;
+    
+    pthread_mutex_t lock;
+    int active;
+} histogram_metric_t;
+
+// ============================================================================
+// HISTOGRAM API
+// ============================================================================
+
+/**
+ * Get or create a histogram metric
+ */
+histogram_metric_t* metrics_get_or_create_histogram(
+    metrics_registry_t *reg,
+    const char *name,
+    const char *help,
+    histogram_buckets_type_t buckets_type,
+    size_t num_labels,
+    const metric_label_t *labels
+);
+
+/**
+ * Observe a value in the histogram
+ * Thread-safe: uses atomic operations
+ */
+void metrics_histogram_observe(histogram_metric_t *metric, double value);
+
+/**
+ * Get predefined bucket configuration
+ */
+histogram_buckets_t metrics_get_buckets(histogram_buckets_type_t type);
+
+/**
+ * Create custom buckets
+ */
+histogram_buckets_t metrics_custom_buckets(const double *bounds, size_t count);
 
 // ============================================================================
 // REGISTRY MANAGEMENT

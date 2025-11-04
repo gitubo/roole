@@ -179,6 +179,13 @@ typedef struct unified_node {
     metrics_t *metric_cluster_members_active;
     metrics_t *metric_cluster_members_suspect;
     metrics_t *metric_cluster_members_dead;
+
+    histogram_metric_t *histogram_exec_duration;
+    histogram_metric_t *histogram_queue_wait;
+    histogram_metric_t *histogram_message_size;
+    histogram_metric_t *histogram_gossip_rtt;
+
+    pthread_t metrics_update_thread;
     
     // Executor threads
     pthread_t *executor_threads;
