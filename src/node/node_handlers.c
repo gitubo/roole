@@ -1,7 +1,8 @@
-// src/node/node_handlers.c
+// src/node/node_handlers.c - PHASE 2: Updated to use node_state_t
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "roole/node_state.h"
 #include "roole/node.h"
 #include "roole/rpc.h"
 #include "roole/common.h"
@@ -11,22 +12,27 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
-// Forward declarations for all RPC handlers
-int handle_submit_message(rpc_async_context_t *context, 
-                          const uint8_t *in_data, size_t in_len);
-int handle_get_execution_status(rpc_async_context_t *context,
-                                const uint8_t *in_data, size_t in_len);
-int handle_list_dags(rpc_async_context_t *context,
-                     const uint8_t *in_data, size_t in_len);
-int handle_process_message(rpc_async_context_t *context,
-                           const uint8_t *in_data, size_t in_len);
-int handle_execution_update(rpc_async_context_t *context,
-                            const uint8_t *in_data, size_t in_len);
-int handle_sync_catalog(rpc_async_context_t *context,
-                        const uint8_t *in_data, size_t in_len);
+// ============================================================================
+// HELPER: GET NODE STATE FROM SERVICE REGISTRY
+// ============================================================================
 
-// External reference to global node state
-extern unified_node_t* node_get_rpc_state(void);
+static inline node_state_t* get_node_state(void) {
+    service_registry_t *registry = service_registry_global();
+    if (!registry) {
+        LOG_ERROR("Global service registry not available");
+        return NULL;
+    }
+    
+    node_state_t *state = (node_state_t*)service_registry_get(
+        registry, SERVICE_TYPE_NODE_STATE, "main"
+    );
+    
+    if (!state) {
+        LOG_ERROR("Node state not registered in service registry");
+    }
+    
+    return state;
+}
 
 // ============================================================================
 // HANDLER: Submit Message (Client -> Node with ingress)
@@ -34,9 +40,9 @@ extern unified_node_t* node_get_rpc_state(void);
 
 int handle_submit_message(rpc_async_context_t *context, 
                           const uint8_t *in_data, size_t in_len) {
-    unified_node_t *node = node_get_rpc_state();
+    node_state_t *state = get_node_state();
     
-    if (!node || in_len < sizeof(rule_id_t)) {
+    if (!state || in_len < sizeof(rule_id_t)) {
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
@@ -49,23 +55,29 @@ int handle_submit_message(rpc_async_context_t *context,
     
     LOG_INFO("[RPC] Received message submission (DAG %u, %zu bytes)", dag_id, message_len);
     
+    // Get subsystems using accessors
+    dag_catalog_t *catalog = node_state_get_dag_catalog(state);
+    peer_pool_t *pool = node_state_get_peer_pool(state);
+    execution_tracker_t *tracker = node_state_get_exec_tracker(state);
+    message_queue_t *queue = node_state_get_message_queue(state);
+    const node_capabilities_t *caps = node_state_get_capabilities(state);
+    const node_identity_t *identity = node_state_get_identity(state);
+    
     // Verify DAG exists
-    dag_t *dag = dag_catalog_get(&node->dag_catalog, dag_id);
+    dag_t *dag = dag_catalog_get(catalog, dag_id);
     if (!dag) {
         LOG_ERROR("DAG %u not found", dag_id);
         return rpc_send_async_response(context, RPC_STATUS_FUNC_NOT_FOUND, NULL, 0);
     }
-    dag_catalog_release(&node->dag_catalog);
+    dag_catalog_release(catalog);
     
-    // Select peer for execution (or self if can_execute)
+    // Select peer for execution
     node_id_t target_peer = 0;
     
-    if (node->capabilities.can_execute) {
-        // Can process locally
-        target_peer = node->node_id;
-    } else if (node->capabilities.can_route) {
-        // Route to capable peer
-        target_peer = peer_pool_select_least_loaded(&node->peer_pool);
+    if (caps->can_execute) {
+        target_peer = identity->node_id;
+    } else if (caps->can_route) {
+        target_peer = peer_pool_select_least_loaded(pool);
         if (target_peer == 0) {
             LOG_ERROR("No available execution peers");
             return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
@@ -76,65 +88,39 @@ int handle_submit_message(rpc_async_context_t *context,
     }
     
     // Create execution record
-    execution_id_t exec_id = execution_tracker_add(&node->exec_tracker, 
-                                                   dag_id, target_peer, 
+    execution_id_t exec_id = execution_tracker_add(tracker, dag_id, target_peer, 
                                                    message, message_len, 3);
     if (exec_id == 0) {
         LOG_ERROR("Failed to create execution record");
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
-    // PUBLISH MESSAGE_RECEIVED EVENT
-    service_registry_t *registry = service_registry_global();
-    event_bus_t *event_bus = NULL;
-    if (registry) {
-        event_bus = (event_bus_t*)service_registry_get(registry,
-                                                        SERVICE_TYPE_EVENT_BUS,
-                                                        "main");
-    }
-
     // Route message
-    if (target_peer == node->node_id) {
-        // Process locally - enqueue
-        message_t msg;
-        msg.exec_id = exec_id;
-        msg.dag_id = dag_id;
-        msg.sender_id = context->sender_id;
-        msg.received_at_ms = time_now_ms();
+    if (target_peer == identity->node_id) {
+        // Process locally
+        message_t msg = {
+            .exec_id = exec_id,
+            .dag_id = dag_id,
+            .sender_id = context->sender_id,
+            .received_at_ms = time_now_ms(),
+            .message_len = message_len
+        };
         memcpy(msg.message_data, message, message_len);
-        msg.message_len = message_len;
         
-        if (message_queue_push(&node->message_queue, &msg) != RESULT_OK) {
+        if (message_queue_push(queue, &msg) != RESULT_OK) {
             LOG_ERROR("Failed to enqueue message locally");
-            execution_tracker_update_status(&node->exec_tracker, exec_id, EXEC_STATUS_FAILED);
+            execution_tracker_update_status(tracker, exec_id, EXEC_STATUS_FAILED);
             return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
         }
         
-        if (event_bus) {
-            event_t event = {
-                .type = EVENT_TYPE_MESSAGE_RECEIVED,
-                .timestamp_ms = time_now_ms(),
-                .source_node_id = node->node_id,
-                .data.message = {
-                    .exec_id = exec_id,
-                    .dag_id = dag_id,
-                    .source_id = context->sender_id,
-                    .dest_id = node->node_id,
-                    .message_size = message_len,
-                    .timestamp_ms = time_now_ms()
-                }
-            };
-            event_bus_publish(event_bus, &event);
-        }
-
         LOG_INFO("[RPC] Message enqueued locally (exec_id: %lu)", exec_id);
     } else {
         // Send to remote peer
-        peer_info_t *peer = peer_pool_get(&node->peer_pool, target_peer);
+        peer_info_t *peer = peer_pool_get(pool, target_peer);
         if (!peer || !peer->data_channel) {
             LOG_ERROR("Peer %u not available", target_peer);
-            execution_tracker_update_status(&node->exec_tracker, exec_id, EXEC_STATUS_FAILED);
-            peer_pool_release(&node->peer_pool);
+            execution_tracker_update_status(tracker, exec_id, EXEC_STATUS_FAILED);
+            peer_pool_release(pool);
             return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
         }
         
@@ -142,7 +128,7 @@ int handle_submit_message(rpc_async_context_t *context,
         size_t payload_len = 8 + 4 + 2 + message_len;
         uint8_t *payload = malloc(payload_len);
         if (!payload) {
-            peer_pool_release(&node->peer_pool);
+            peer_pool_release(pool);
             return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
         }
         
@@ -154,7 +140,7 @@ int handle_submit_message(rpc_async_context_t *context,
         // Send via DATA channel
         size_t rpc_msg_len = rpc_pack_message(
             peer->data_channel->tx_buffer,
-            node->node_id,
+            identity->node_id,
             exec_id,
             RPC_TYPE_REQUEST,
             RPC_STATUS_UNKNOWN,
@@ -167,42 +153,19 @@ int handle_submit_message(rpc_async_context_t *context,
                            peer->data_channel->tx_buffer, rpc_msg_len, 0);
         
         free(payload);
-        peer_pool_release(&node->peer_pool);
+        peer_pool_release(pool);
         
         if (sent <= 0) {
             LOG_ERROR("Failed to send message to peer %u", target_peer);
-            execution_tracker_update_status(&node->exec_tracker, exec_id, EXEC_STATUS_FAILED);
+            execution_tracker_update_status(tracker, exec_id, EXEC_STATUS_FAILED);
             return rpc_send_async_response(context, RPC_STATUS_NETWORK, NULL, 0);
-        }
-
-        // PUBLISH MESSAGE_ROUTED EVENT
-        if (event_bus) {
-            event_t event = {
-                .type = EVENT_TYPE_MESSAGE_ROUTED,
-                .timestamp_ms = time_now_ms(),
-                .source_node_id = node->node_id,
-                .data.message = {
-                    .exec_id = exec_id,
-                    .dag_id = dag_id,
-                    .source_id = node->node_id,
-                    .dest_id = target_peer,
-                    .message_size = message_len,
-                    .timestamp_ms = time_now_ms()
-                }
-            };
-            event_bus_publish(event_bus, &event);
         }
         
         LOG_INFO("[RPC] Message routed to peer %u (exec_id: %lu)", target_peer, exec_id);
-        
-        // Update metrics
-        if (node->metric_messages_routed) {
-            metrics_counter_inc(node->metric_messages_routed);
-        }
     }
     
     // Mark as running
-    execution_tracker_update_status(&node->exec_tracker, exec_id, EXEC_STATUS_RUNNING);
+    execution_tracker_update_status(tracker, exec_id, EXEC_STATUS_RUNNING);
     
     // Build response: [exec_id][status]
     uint8_t response[9];
@@ -218,22 +181,23 @@ int handle_submit_message(rpc_async_context_t *context,
 
 int handle_get_execution_status(rpc_async_context_t *context,
                                 const uint8_t *in_data, size_t in_len) {
-    unified_node_t *node = node_get_rpc_state();
+    node_state_t *state = get_node_state();
     
-    if (!node || in_len != sizeof(execution_id_t)) {
+    if (!state || in_len != sizeof(execution_id_t)) {
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
     execution_id_t exec_id;
     memcpy(&exec_id, in_data, sizeof(execution_id_t));
     
-    execution_record_t *rec = execution_tracker_get(&node->exec_tracker, exec_id);
+    execution_tracker_t *tracker = node_state_get_exec_tracker(state);
+    execution_record_t *rec = execution_tracker_get(tracker, exec_id);
     if (!rec) {
         return rpc_send_async_response(context, RPC_STATUS_FUNC_NOT_FOUND, NULL, 0);
     }
     
     uint8_t status = (uint8_t)rec->status;
-    execution_tracker_release(&node->exec_tracker);
+    execution_tracker_release(tracker);
     
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &status, 1);
 }
@@ -242,19 +206,20 @@ int handle_get_execution_status(rpc_async_context_t *context,
 // HANDLER: List DAGs
 // ============================================================================
 
-
 int handle_list_dags(rpc_async_context_t *context,
                      const uint8_t *in_data, size_t in_len) {
     (void)in_data;
     (void)in_len;
     
-    unified_node_t *node = node_get_rpc_state();
-    if (!node) {
+    node_state_t *state = get_node_state();
+    if (!state) {
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
+    dag_catalog_t *catalog = node_state_get_dag_catalog(state);
+    
     rule_id_t dag_ids[MAX_DAGS];
-    size_t count = dag_catalog_list(&node->dag_catalog, dag_ids, MAX_DAGS);
+    size_t count = dag_catalog_list(catalog, dag_ids, MAX_DAGS);
     
     // Build response: [count: 4 bytes][dag_id_1: 4 bytes]...
     size_t response_len = sizeof(uint32_t) + count * sizeof(rule_id_t);
@@ -274,14 +239,14 @@ int handle_list_dags(rpc_async_context_t *context,
 }
 
 // ============================================================================
-// HANDLER: Process Message (Peer -> Node with execution capability)
+// HANDLER: Process Message (Peer -> Executor)
 // ============================================================================
 
 int handle_process_message(rpc_async_context_t *context,
                            const uint8_t *in_data, size_t in_len) {
-    unified_node_t *node = node_get_rpc_state();
+    node_state_t *state = get_node_state();
     
-    if (!node || in_len < 14) {
+    if (!state || in_len < 14) {
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
@@ -299,16 +264,18 @@ int handle_process_message(rpc_async_context_t *context,
     LOG_INFO("[RPC] Received message for processing (exec_id: %lu, DAG: %u)",
              exec_id, dag_id);
     
-    // Enqueue for execution
-    message_t msg;
-    msg.exec_id = exec_id;
-    msg.dag_id = dag_id;
-    msg.sender_id = sender_id;
-    msg.received_at_ms = time_now_ms();
-    memcpy(msg.message_data, message, message_len);
-    msg.message_len = message_len;
+    message_queue_t *queue = node_state_get_message_queue(state);
     
-    int result = message_queue_push(&node->message_queue, &msg);
+    message_t msg = {
+        .exec_id = exec_id,
+        .dag_id = dag_id,
+        .sender_id = sender_id,
+        .received_at_ms = time_now_ms(),
+        .message_len = message_len
+    };
+    memcpy(msg.message_data, message, message_len);
+    
+    int result = message_queue_push(queue, &msg);
     if (result != RESULT_OK) {
         LOG_ERROR("[RPC] Failed to enqueue message");
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
@@ -324,9 +291,9 @@ int handle_process_message(rpc_async_context_t *context,
 
 int handle_execution_update(rpc_async_context_t *context,
                             const uint8_t *in_data, size_t in_len) {
-    unified_node_t *node = node_get_rpc_state();
+    node_state_t *state = get_node_state();
     
-    if (!node || in_len != 9) {
+    if (!state || in_len != 9) {
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
@@ -338,7 +305,8 @@ int handle_execution_update(rpc_async_context_t *context,
     
     execution_status_t status = (execution_status_t)status_byte;
     
-    execution_tracker_update_status(&node->exec_tracker, exec_id, status);
+    execution_tracker_t *tracker = node_state_get_exec_tracker(state);
+    execution_tracker_update_status(tracker, exec_id, status);
     
     LOG_DEBUG("[RPC] Execution %lu status updated to %d", exec_id, status);
     
@@ -352,9 +320,9 @@ int handle_execution_update(rpc_async_context_t *context,
 
 int handle_sync_catalog(rpc_async_context_t *context,
                        const uint8_t *in_data, size_t in_len) {
-    unified_node_t *node = node_get_rpc_state();
+    node_state_t *state = get_node_state();
     
-    if (!node || in_len < sizeof(dag_t)) {
+    if (!state || in_len < sizeof(dag_t)) {
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
@@ -364,9 +332,11 @@ int handle_sync_catalog(rpc_async_context_t *context,
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
-    int result = dag_catalog_add(&node->dag_catalog, &dag);
+    dag_catalog_t *catalog = node_state_get_dag_catalog(state);
+    
+    int result = dag_catalog_add(catalog, &dag);
     if (result == RESULT_ERR_EXISTS) {
-        result = dag_catalog_update(&node->dag_catalog, &dag);
+        result = dag_catalog_update(catalog, &dag);
     }
     
     if (result == RESULT_OK) {

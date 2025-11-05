@@ -311,8 +311,13 @@ int node_init(unified_node_t *node, const roole_config_t *config,
     }
     
     // Initialize membership (gossip protocol)
-    if (membership_init(&node->membership, node->node_id, node->node_type,
-                       node->bind_addr, node->gossip_port, node->data_port) != RESULT_OK) {
+    if (membership_init(&node->membership, 
+                       node->node_id, 
+                       node->node_type,
+                       node->bind_addr, 
+                       node->gossip_port, 
+                       node->data_port,
+                       &node->cluster_view) != RESULT_OK) {  // ✅ Pass shared view
         LOG_ERROR("Failed to initialize membership");
         cluster_view_destroy(&node->cluster_view);
         if (node->capabilities.can_execute) {
@@ -370,6 +375,7 @@ int node_init(unified_node_t *node, const roole_config_t *config,
         LOG_INFO("  Metrics: DISABLED");
     }
     
+    LOG_INFO("  ✅ Using shared cluster_view at %p", (void*)&node->cluster_view);
     LOG_INFO("========================================");
     
     return RESULT_OK;

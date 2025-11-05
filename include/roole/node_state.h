@@ -1,3 +1,9 @@
+// ============================================================================
+// SOLUTION 1: Update node_state.h to use types from node.h
+// ============================================================================
+
+// include/roole/node_state.h - FIXED VERSION
+
 #ifndef ROOLE_NODE_STATE_H
 #define ROOLE_NODE_STATE_H
 
@@ -7,7 +13,7 @@
 #include "roole/dag.h"
 #include "roole/metrics.h"
 #include "roole/event_bus.h"
-#include "roole/node.h"
+#include "roole/node.h"  // ✅ CHANGED: Include node.h FIRST to get types
 #include <pthread.h>
 
 // ============================================================================
@@ -25,15 +31,8 @@ typedef struct node_identity {
     uint16_t metrics_port;           // 0 if disabled
 } node_identity_t;
 
-// ============================================================================
-// NODE CAPABILITIES (Derived from configuration)
-// ============================================================================
-
-typedef struct node_capabilities {
-    int has_ingress;        // Accepts external client requests
-    int can_execute;        // Processes messages (runs executor threads)
-    int can_route;          // Routes messages to other nodes
-} node_capabilities_t;
+// ❌ REMOVED: node_capabilities_t definition (now from node.h)
+// Use node_capabilities_t from node.h instead
 
 // ============================================================================
 // NODE STATE (Single source of truth)
@@ -42,7 +41,7 @@ typedef struct node_capabilities {
 typedef struct node_state {
     // Identity (immutable)
     node_identity_t identity;
-    node_capabilities_t capabilities;
+    node_capabilities_t capabilities;  // ✅ Type from node.h
     
     // Owned subsystems (node_state has exclusive ownership)
     dag_catalog_t *dag_catalog;
@@ -81,31 +80,15 @@ typedef struct node_state {
 // LIFECYCLE API
 // ============================================================================
 
-/**
- * Initialize node state from configuration
- * All subsystems are initialized but not started
- */
 result_t node_state_init(node_state_t **state, const roole_config_t *config,
                          size_t num_executor_threads);
 
-/**
- * Start all background threads and RPC servers
- */
 result_t node_state_start(node_state_t *state);
 
-/**
- * Bootstrap from seed routers
- */
 result_t node_state_bootstrap(node_state_t *state, const roole_config_t *config);
 
-/**
- * Graceful shutdown (blocking until complete)
- */
 void node_state_shutdown(node_state_t *state);
 
-/**
- * Destroy and free all resources
- */
 void node_state_destroy(node_state_t *state);
 
 // ============================================================================
@@ -141,3 +124,4 @@ typedef struct node_statistics {
 void node_state_get_statistics(const node_state_t *state, node_statistics_t *stats);
 
 #endif // ROOLE_NODE_STATE_H
+

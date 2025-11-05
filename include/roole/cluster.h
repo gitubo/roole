@@ -1,4 +1,5 @@
 // include/roole/cluster.h
+// PHASE 1: Updated membership_handle_t to use shared cluster_view
 
 #ifndef ROOLE_CLUSTER_H
 #define ROOLE_CLUSTER_H
@@ -81,6 +82,7 @@ typedef void (*member_event_cb)(node_id_t node_id, node_type_t type,
                                 const char *ip, uint16_t data_port,
                                 const char *event_type, void *user_data);
 
+// ✅ PHASE 1 CHANGE: Use pointer to shared view instead of owned copy
 typedef struct membership_handle {
     node_id_t my_id;
     node_type_t my_type;
@@ -88,7 +90,9 @@ typedef struct membership_handle {
     uint16_t gossip_port;
     uint16_t data_port;
     
-    cluster_view_t internal_view;
+    // ✅ CHANGED: Was `cluster_view_t internal_view` (owned copy)
+    // Now: pointer to externally-owned shared view
+    cluster_view_t *shared_view;
     
     member_event_cb event_callback;
     void *event_callback_user_data;
@@ -103,10 +107,19 @@ typedef struct membership_handle {
 #define MEMBER_EVENT_FAILED "member-failed"
 #define MEMBER_EVENT_UPDATE "member-update"
 
+// ✅ PHASE 1 CHANGE: Add shared_view parameter
+// OLD: int membership_init(membership_handle_t **handle, node_id_t my_id, 
+//                         node_type_t my_type, const char *bind_addr, 
+//                         uint16_t gossip_port, uint16_t data_port);
+// NEW:
+int membership_init(membership_handle_t **handle, 
+                   node_id_t my_id, 
+                   node_type_t my_type, 
+                   const char *bind_addr, 
+                   uint16_t gossip_port, 
+                   uint16_t data_port,
+                   cluster_view_t *shared_view);  // ✅ NEW parameter
 
-// Membership API
-int membership_init(membership_handle_t **handle, node_id_t my_id, 
-                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port, uint16_t data_port);
 int membership_join(membership_handle_t *handle, const char *seed_addr, uint16_t seed_port);
 int membership_set_callback(membership_handle_t *handle, member_event_cb callback, void *user_data);
 int membership_leave(membership_handle_t *handle);

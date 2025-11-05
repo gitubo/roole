@@ -1,7 +1,7 @@
 // src/cluster/membership.c
+// PHASE 1: Refactored to use shared cluster_view instead of internal_view
 
 #define _POSIX_C_SOURCE 200809L
-//#define _DEFAULT_SOURCE
 
 #include "roole/cluster.h"
 #include "roole/common.h"
@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 // ============================================================================
-// CLUSTER VIEW IMPLEMENTATION
+// CLUSTER VIEW IMPLEMENTATION (Unchanged)
 // ============================================================================
 
 int cluster_view_init(cluster_view_t *view, size_t capacity) {
@@ -62,19 +62,17 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
     for (size_t i = 0; i < view->count; i++) {
         if (view->members[i].node_id == member->node_id) {
             // Node exists - update it if new incarnation or status change
-            // CRITICAL: Allow DEAD nodes to rejoin with ALIVE status
             if (member->status == NODE_STATUS_ALIVE && 
                 view->members[i].status == NODE_STATUS_DEAD) {
                 // Rejoining node - update everything
                 view->members[i] = *member;
                 view->members[i].last_seen_ms = time_now_ms();
-                view->members[i].incarnation = member->incarnation + 1; // Bump incarnation
+                view->members[i].incarnation = member->incarnation + 1;
                 pthread_rwlock_unlock(&view->lock);
                 LOG_INFO("Node %u rejoined cluster (was DEAD, now ALIVE, incarnation=%lu)", 
                          member->node_id, view->members[i].incarnation);
                 return RESULT_OK;
             }
-            // For other updates, use the standard update mechanism
             else if (member->incarnation >= view->members[i].incarnation) {
                 view->members[i] = *member;
                 view->members[i].last_seen_ms = time_now_ms();
@@ -83,7 +81,6 @@ int cluster_view_add(cluster_view_t *view, const cluster_member_t *member) {
                           member->node_id, member->incarnation);
                 return RESULT_OK;
             }
-            // Reject stale updates
             pthread_rwlock_unlock(&view->lock);
             LOG_DEBUG("Ignoring stale update for node %u (inc %lu <= %lu)", 
                       member->node_id, member->incarnation, view->members[i].incarnation);
@@ -123,15 +120,11 @@ int cluster_view_update_status(cluster_view_t *view, node_id_t node_id,
                 view->members[i].status = status;
                 view->members[i].incarnation = incarnation;
                 
-                // CRITICAL FIX: Only update last_seen_ms when transitioning to ALIVE
-                // Keep the original timestamp for SUSPECT/DEAD to allow timeout detection
                 if (status == NODE_STATUS_ALIVE) {
                     view->members[i].last_seen_ms = time_now_ms();
                 } else if (status == NODE_STATUS_SUSPECT && old_status == NODE_STATUS_ALIVE) {
-                    // When first marking as SUSPECT, record the time
                     view->members[i].last_seen_ms = time_now_ms();
                 }
-                // For SUSPECT->SUSPECT or SUSPECT->DEAD, preserve original last_seen_ms
                 
                 pthread_rwlock_unlock(&view->lock);
                 LOG_DEBUG("Updated node %u status to %d (incarnation %lu)", 
@@ -229,12 +222,22 @@ size_t cluster_view_list_alive(cluster_view_t *view, node_type_t type,
 }
 
 // ============================================================================
-// MEMBERSHIP HANDLE IMPLEMENTATION
+// MEMBERSHIP HANDLE IMPLEMENTATION - ✅ PHASE 1 REFACTORED
 // ============================================================================
 
-int membership_init(membership_handle_t **handle, node_id_t my_id, 
-                   node_type_t my_type, const char *bind_addr, uint16_t gossip_port, uint16_t data_port) {
-    if (!handle) return RESULT_ERR_INVALID;
+int membership_init(membership_handle_t **handle, 
+                   node_id_t my_id, 
+                   node_type_t my_type, 
+                   const char *bind_addr, 
+                   uint16_t gossip_port, 
+                   uint16_t data_port,
+                   cluster_view_t *shared_view) {  // ✅ NEW parameter
+    
+    // ✅ VALIDATION: Ensure shared_view is provided
+    if (!handle || !shared_view) {
+        LOG_ERROR("membership_init: handle or shared_view is NULL");
+        return RESULT_ERR_INVALID;
+    }
     
     membership_handle_t *h = safe_calloc(1, sizeof(membership_handle_t));
     if (!h) return RESULT_ERR_NOMEM;
@@ -246,11 +249,13 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
     h->data_port = data_port;
     h->shutdown_flag = 0;
     
-    if (cluster_view_init(&h->internal_view, MAX_CLUSTER_NODES) != RESULT_OK) {
-        safe_free(h);
-        return RESULT_ERR_INVALID;
-    }
+    // ✅ PHASE 1 CHANGE: Store pointer to shared view instead of creating internal copy
+    // OLD: cluster_view_init(&h->internal_view, MAX_CLUSTER_NODES);
+    h->shared_view = shared_view;
     
+    LOG_DEBUG("membership_init: Using shared cluster_view at %p", (void*)shared_view);
+    
+    // Add self to shared cluster view (not internal copy)
     cluster_member_t self = {
         .node_id = my_id,
         .node_type = my_type,
@@ -261,10 +266,13 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
         .last_seen_ms = time_now_ms()
     };
     safe_strncpy(self.ip_address, h->bind_addr, MAX_IP_LEN);
-    cluster_view_add(&h->internal_view, &self);
+    
+    // ✅ CHANGED: Add to shared_view instead of internal_view
+    cluster_view_add(h->shared_view, &self);
     
     gossip_config_t gossip_config = gossip_default_config();
     
+    // ✅ CHANGED: Pass shared_view to gossip engine (already correct in original code)
     h->gossip_engine = gossip_engine_init(
         my_id,
         my_type,
@@ -272,14 +280,14 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
         gossip_port,
         data_port,
         &gossip_config,
-        &h->internal_view,
+        h->shared_view,  // ✅ Use shared_view
         NULL,
         NULL
     );
     
     if (!h->gossip_engine) {
         LOG_ERROR("Failed to initialize gossip engine");
-        cluster_view_destroy(&h->internal_view);
+        // ❌ REMOVED: cluster_view_destroy(&h->internal_view);
         safe_free(h);
         return RESULT_ERR_INVALID;
     }
@@ -287,14 +295,14 @@ int membership_init(membership_handle_t **handle, node_id_t my_id,
     if (gossip_engine_start(h->gossip_engine) != 0) {
         LOG_ERROR("Failed to start gossip engine");
         gossip_engine_shutdown(h->gossip_engine);
-        cluster_view_destroy(&h->internal_view);
+        // ❌ REMOVED: cluster_view_destroy(&h->internal_view);
         safe_free(h);
         return RESULT_ERR_INVALID;
     }
     
     *handle = h;
-    LOG_INFO("Membership initialized (node_id=%u, type=%d, gossip_port=%u)", 
-             my_id, my_type, gossip_port);
+    LOG_INFO("Membership initialized (node_id=%u, type=%d, gossip_port=%u, shared_view=%p)", 
+             my_id, my_type, gossip_port, (void*)shared_view);
     return RESULT_OK;
 }
 
@@ -344,6 +352,8 @@ int membership_leave(membership_handle_t *handle) {
 void membership_shutdown(membership_handle_t *handle) {
     if (!handle) return;
     
+    LOG_INFO("Shutting down membership...");
+    
     handle->shutdown_flag = 1;
     
     if (handle->gossip_engine) {
@@ -351,27 +361,35 @@ void membership_shutdown(membership_handle_t *handle) {
         handle->gossip_engine = NULL;
     }
     
-    cluster_view_destroy(&handle->internal_view);
+    // ❌ REMOVED: cluster_view_destroy(&handle->internal_view);
+    // ✅ RATIONALE: shared_view is owned by caller (node_state), not membership
+    LOG_DEBUG("Membership shutdown: shared_view ownership retained by caller");
+    
     safe_free(handle);
     
     LOG_INFO("Membership shutdown complete");
 }
 
-size_t membership_get_members(membership_handle_t *handle, cluster_member_t *out_members, size_t max_count) {
+// ✅ CHANGED: Use shared_view instead of internal_view
+size_t membership_get_members(membership_handle_t *handle, 
+                              cluster_member_t *out_members, 
+                              size_t max_count) {
     if (!handle || !out_members || max_count == 0) return 0;
     
-    pthread_rwlock_rdlock(&handle->internal_view.lock);
+    // ✅ CHANGED: Access shared_view
+    pthread_rwlock_rdlock(&handle->shared_view->lock);
     
-    size_t count = ROOLE_MIN(handle->internal_view.count, max_count);
-    memcpy(out_members, handle->internal_view.members, count * sizeof(cluster_member_t));
+    size_t count = ROOLE_MIN(handle->shared_view->count, max_count);
+    memcpy(out_members, handle->shared_view->members, 
+           count * sizeof(cluster_member_t));
     
-    pthread_rwlock_unlock(&handle->internal_view.lock);
+    pthread_rwlock_unlock(&handle->shared_view->lock);
     
     return count;
 }
 
 // ============================================================================
-// DEBUG HELPERS
+// DEBUG HELPERS (Unchanged)
 // ============================================================================
 
 void cluster_view_dump(cluster_view_t *view, const char *label) {
