@@ -122,8 +122,8 @@ if [ -z "$METRICS" ]; then
     exit 1
 fi
 
-TOTAL=$(echo "$METRICS" | grep "cluster_members_total" | awk '{print $2}')
-ACTIVE=$(echo "$METRICS" | grep "cluster_members_active" | awk '{print $2}')
+TOTAL=$(echo "$METRICS" | grep "cluster_members_total{" | grep -v "^#" | awk '{print $2}')
+ACTIVE=$(echo "$METRICS" | grep "cluster_members_active{" | grep -v "^#" | awk '{print $2}')
 
 if [ "$TOTAL" != "3" ] || [ "$ACTIVE" != "3" ]; then
     echo "  ✗ FAIL: Cluster formation incomplete (total=$TOTAL active=$ACTIVE)"

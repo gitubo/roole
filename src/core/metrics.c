@@ -253,6 +253,13 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
         
         pthread_mutex_lock(&m->lock);
         
+        // Check buffer space (need at least 512 bytes for safety)
+        if (offset + 512 >= buffer_size) {
+            LOG_WARN("Metrics buffer full, truncating output");
+            pthread_mutex_unlock(&m->lock);
+            break;
+        }
+        
         // Format: # HELP metric_name help text
         int written = snprintf(buffer + offset, buffer_size - offset,
                               "# HELP %s %s\n", m->name, m->help);
@@ -311,10 +318,11 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
             offset += written;
         }
         
-        // Add value
+        // CRITICAL FIX: Add value on same line (with space before it)
         written = snprintf(buffer + offset, buffer_size - offset,
                           " %.0f\n", m->value);
         if (written < 0 || (size_t)written >= buffer_size - offset) {
+            LOG_WARN("Failed to write metric value for %s", m->name);
             pthread_mutex_unlock(&m->lock);
             break;
         }
@@ -326,5 +334,6 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
 done:
     pthread_mutex_unlock(&reg->lock);
     
+    LOG_DEBUG("Rendered %zu bytes of metrics", offset);
     return buffer;
 }

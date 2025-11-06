@@ -41,7 +41,7 @@ static inline uint64_t read_u64_net(const uint8_t *buffer) {
 // HELPER: Member Update Serialization (DRY)
 // ============================================================================
 
-#define MEMBER_UPDATE_SIZE 44  // Fixed size: 2+1+1+16+2+2+8+8+4(padding)
+#define MEMBER_UPDATE_SIZE 40  // Fixed size: 2+1+1+16+2+2+8+8+4(padding)
 
 /**
  * Serialize a single member update into buffer
@@ -211,6 +211,9 @@ int gossip_message_deserialize(const uint8_t *buffer,
     msg->num_updates = buffer[offset++];
     offset++;  // Skip padding
     
+    LOG_DEBUG("Deserializing message: buffer_size=%zu, header parsed, num_updates=%u", 
+              buffer_size, msg->num_updates);
+
     // Piggyback updates - use helper
     for (uint8_t i = 0; i < msg->num_updates && i < GOSSIP_MAX_PIGGYBACK_UPDATES; i++) {
         if (offset + MEMBER_UPDATE_SIZE > buffer_size) {

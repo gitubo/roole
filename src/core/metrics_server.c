@@ -247,12 +247,11 @@ static int setup_server_socket(const char *bind_addr, uint16_t port) {
     }
 #endif
     
-    // IMPORTANT: Set socket to non-blocking BEFORE listen
-    int flags = fcntl(server_fd, F_GETFL, 0);
-    if (flags >= 0) {
-        // DON'T set non-blocking yet - do it AFTER listen
-        // fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);  // REMOVE THIS
-    }
+    // ❌ REMOVED: Do NOT set non-blocking here
+    // int flags = fcntl(server_fd, F_GETFL, 0);
+    // if (flags >= 0) {
+    //     fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+    // }
     
     // Prepare address structure
     memset(&addr, 0, sizeof(addr));
@@ -278,6 +277,15 @@ static int setup_server_socket(const char *bind_addr, uint16_t port) {
         LOG_ERROR("Failed to listen on server socket: %s", strerror(errno));
         close(server_fd);
         return -1;
+    }
+    
+    // ✅ NOW set non-blocking (AFTER listen succeeds)
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    if (flags >= 0) {
+        if (fcntl(server_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            LOG_WARN("Failed to set non-blocking mode: %s", strerror(errno));
+            // Continue anyway - not critical
+        }
     }
     
     LOG_INFO("Metrics server socket bound to %s:%u", bind_addr, port);

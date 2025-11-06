@@ -86,6 +86,14 @@ set_target_properties(client PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+# Client binary (testing tool - stays in test/)
+add_executable(dag_register test/dag_register.c)
+target_link_libraries(dag_register roole_core)
+set_target_properties(dag_register PROPERTIES
+    OUTPUT_NAME "roole-dag-register"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 # ============================================================================
 # INSTALL TARGETS
 # ============================================================================

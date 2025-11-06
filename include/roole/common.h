@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
+#include <string.h>
+#include <stdio.h>
 #include "roole/logger.h" 
 
 // ============================================================================
