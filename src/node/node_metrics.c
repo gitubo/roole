@@ -139,6 +139,8 @@ int node_metrics_init_ex(node_state_t *state, const char *metrics_addr) {
     );
 
     // Create histogram metrics
+    /**** TODO HISTOGRAM ****/
+    /*
     state->histogram_exec_duration = metrics_get_or_create_histogram(
         state->metrics_registry,
         "execution_duration_ms",
@@ -170,7 +172,7 @@ int node_metrics_init_ex(node_state_t *state, const char *metrics_addr) {
         HISTOGRAM_BUCKETS_LATENCY_US,
         3, labels
     );
-    
+    */
     LOG_INFO("All metrics created with standard labels (cluster_name, node_id, node_type)");
     
     // Start HTTP server

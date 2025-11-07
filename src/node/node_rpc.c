@@ -128,11 +128,13 @@ rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
     return table;
 }
 
+/*
 void node_free_rpc_service_table(rpc_service_entry_t *table) {
     if (table) {
         free(table);
     }
 }
+*/
 
 // ============================================================================
 // RPC SERVER STARTUP (Capability-driven)

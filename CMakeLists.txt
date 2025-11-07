@@ -59,7 +59,6 @@ add_library(roole_node STATIC
     src/node/node_core.c
     src/node/node_bootstrap.c
     src/node/node_state.c
-    src/node/peer_pool.c
 )
 target_link_libraries(roole_node 
     PUBLIC roole_core roole_dag roole_cluster

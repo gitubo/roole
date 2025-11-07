@@ -21,13 +21,13 @@
 // ============================================================================
 // NODE CAPABILITIES (Configuration-driven flags)
 // ============================================================================
-
+/*
 typedef struct node_capabilities {
     int has_ingress;        // Accepts external client requests
     int can_execute;        // Processes messages (runs executor threads)
     int can_route;          // Routes messages to other nodes
 } node_capabilities_t;
-
+*/
 // ============================================================================
 // PEER INFO (Replaces worker_info_t - tracks all cluster nodes)
 // ============================================================================

@@ -7,10 +7,21 @@
 #include "roole/config.h"
 #include "roole/cluster.h"
 #include "roole/dag.h"
+#include "roole/metrics_server.h"
 #include "roole/metrics.h"
 #include "roole/event_bus.h"
-#include "roole/node.h"
+//#include "roole/node.h"
 #include <pthread.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS (to break circular dependency)
+// ============================================================================
+
+typedef struct node_capabilities node_capabilities_t;
+typedef struct peer_pool peer_pool_t;
+typedef struct execution_tracker execution_tracker_t;
+typedef struct message_queue message_queue_t;
+typedef struct membership_handle membership_handle_t;
 
 // ============================================================================
 // NODE IDENTITY (Immutable after initialization)
@@ -26,6 +37,12 @@ typedef struct node_identity {
     uint16_t ingress_port;
     uint16_t metrics_port;
 } node_identity_t;
+
+typedef struct node_capabilities {
+    int has_ingress;        // Accepts external client requests
+    int can_execute;        // Processes messages (runs executor threads)
+    int can_route;          // Routes messages to other nodes
+} node_capabilities_t;
 
 // ============================================================================
 // NODE STATE (Single source of truth)
@@ -58,8 +75,16 @@ typedef struct node_state {
     metrics_t *metric_cluster_members_dead;
     metrics_t *metric_messages_processed;
     metrics_t *metric_messages_failed;
+    metrics_t *metric_messages_routed;
+    metrics_t *metric_queue_size;
+    metrics_t *metric_active_executions;
     metrics_t *metric_uptime_seconds;
     
+    histogram_metric_t *histogram_exec_duration;
+    histogram_metric_t *histogram_queue_wait;
+    histogram_metric_t *histogram_message_size;
+    histogram_metric_t *histogram_gossip_rtt;
+
     // Lifecycle
     uint64_t start_time_ms;
     volatile int shutdown_flag;
