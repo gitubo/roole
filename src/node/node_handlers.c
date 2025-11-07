@@ -13,10 +13,6 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-// ============================================================================
-// HELPER: GET NODE STATE FROM SERVICE REGISTRY
-// ============================================================================
-
 static inline node_state_t* get_node_state(void) {
     service_registry_t *registry = service_registry_global();
     if (!registry) {
@@ -175,7 +171,6 @@ int handle_submit_message(rpc_async_context_t *context,
     
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, response, 9);
 }
-
 // ============================================================================
 // HANDLER: Get Execution Status
 // ============================================================================
@@ -348,6 +343,10 @@ int handle_sync_catalog(rpc_async_context_t *context,
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
 }
 
+// ============================================================================
+// HANDLER: Add DAG
+// ============================================================================
+
 int handle_add_dag(rpc_async_context_t *context,
                    const uint8_t *in_data, size_t in_len) {
     
@@ -440,7 +439,7 @@ int handle_add_dag(rpc_async_context_t *context,
             dag.steps[i].dependencies[j] = dep_id;
         }
         
-        dag.steps[i].timeout_ms = 30000;  // 30 seconds default
+        dag.steps[i].timeout_ms = 30000;
         dag.steps[i].max_retries = 3;
     }
     
@@ -462,7 +461,6 @@ int handle_add_dag(rpc_async_context_t *context,
     LOG_INFO("DAG %u '%s' registered successfully (%u stages)", 
              dag_id, dag_name, num_stages);
     
-    // Send success response
     uint8_t ack = 1;
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
 }

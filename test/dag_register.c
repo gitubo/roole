@@ -159,7 +159,7 @@ int main(int argc, char *argv[]) {
         request_id++,
         RPC_TYPE_REQUEST,
         RPC_STATUS_UNKNOWN,
-        FUNC_ID_ADD_DAG,  // ✅ Correct function ID for DAG registration
+        FUNC_ID_ADD_DAG,  
         payload,
         payload_size
     );

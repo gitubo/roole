@@ -1,7 +1,6 @@
-// src/node/node_metrics.c
-
 #define _POSIX_C_SOURCE 200809L
 
+#include "roole/node_state.h"
 #include "roole/node.h"
 #include "roole/config.h"
 #include "roole/common.h"
@@ -15,14 +14,14 @@
 // UNIFIED METRICS INITIALIZATION
 // ============================================================================
 
-int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
-    if (!node) return RESULT_ERR_INVALID;
+int node_metrics_init_ex(node_state_t *state, const char *metrics_addr) {
+    if (!state) return RESULT_ERR_INVALID;
     
     // If no metrics address, skip metrics
     if (!metrics_addr || strlen(metrics_addr) == 0) {
         LOG_INFO("Metrics disabled: no metrics_addr configured");
-        node->metrics_registry = NULL;
-        node->metrics_server = NULL;
+        state->metrics_registry = NULL;
+        state->metrics_server = NULL;
         return RESULT_OK;
     }
     
@@ -33,158 +32,155 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
     
     if (metrics_port == 0) {
         LOG_WARN("Metrics disabled: invalid port in config");
-        node->metrics_registry = NULL;
-        node->metrics_server = NULL;
+        state->metrics_registry = NULL;
+        state->metrics_server = NULL;
         return RESULT_OK;
     }
     
     LOG_INFO("Initializing metrics system on %s:%u...", metrics_ip, metrics_port);
     
     // Create registry
-    node->metrics_registry = metrics_registry_init();
-    if (!node->metrics_registry) {
+    state->metrics_registry = metrics_registry_init();
+    if (!state->metrics_registry) {
         LOG_WARN("Failed to initialize metrics registry");
         return RESULT_ERR_NOMEM;
     }
     
-    // Build standard labels (cluster_name, node_id, node_type)
+    // Get identity
+    const node_identity_t *id = node_state_get_identity(state);
+    const node_capabilities_t *caps = node_state_get_capabilities(state);
+    
+    // Build standard labels
     char node_id_str[32];
-    snprintf(node_id_str, sizeof(node_id_str), "%u", node->node_id);
+    snprintf(node_id_str, sizeof(node_id_str), "%u", id->node_id);
     
-    // Determine node_type label based on capabilities
-    const char *node_type_label = node->capabilities.has_ingress ? "router" : "worker";
+    const char *node_type_label = caps->has_ingress ? "router" : "worker";
     
-    // Create standard labels (reuse from existing code)
+    // Create standard labels
     metric_label_t labels[3];
     safe_strncpy(labels[0].name, "cluster_name", MAX_LABEL_NAME_LEN);
-    safe_strncpy(labels[0].value, node->cluster_name, MAX_LABEL_VALUE_LEN);
+    safe_strncpy(labels[0].value, id->cluster_name, MAX_LABEL_VALUE_LEN);
     safe_strncpy(labels[1].name, "node_id", MAX_LABEL_NAME_LEN);
     safe_strncpy(labels[1].value, node_id_str, MAX_LABEL_VALUE_LEN);
     safe_strncpy(labels[2].name, "node_type", MAX_LABEL_NAME_LEN);
     safe_strncpy(labels[2].value, node_type_label, MAX_LABEL_VALUE_LEN);
     
-    // Create counter metrics (all with 3 labels)
-    node->metric_messages_processed = metrics_get_or_create_counter(
-        node->metrics_registry,
+    // Create counter metrics
+    state->metric_messages_processed = metrics_get_or_create_counter(
+        state->metrics_registry,
         "messages_processed_total",
         "Total number of messages successfully processed",
         3, labels
     );
     
-    node->metric_messages_failed = metrics_get_or_create_counter(
-        node->metrics_registry,
+    state->metric_messages_failed = metrics_get_or_create_counter(
+        state->metrics_registry,
         "messages_failed_total",
         "Total number of messages that failed processing",
         3, labels
     );
     
-    node->metric_messages_routed = metrics_get_or_create_counter(
-        node->metrics_registry,
+    state->metric_messages_routed = metrics_get_or_create_counter(
+        state->metrics_registry,
         "messages_routed_total",
         "Total number of messages routed to other nodes",
         3, labels
     );
     
-    // Create gauge metrics (all with 3 labels)
-    node->metric_queue_size = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    // Create gauge metrics
+    state->metric_queue_size = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "messages_queue_size",
         "Current number of messages in processing queue",
         3, labels
     );
     
-    node->metric_active_executions = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    state->metric_active_executions = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "active_executions",
         "Number of currently executing messages",
         3, labels
     );
     
-    node->metric_uptime_seconds = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    state->metric_uptime_seconds = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "uptime_seconds",
         "Node uptime in seconds",
         3, labels
     );
     
-    // Cluster metrics (all with 3 labels)
-    node->metric_cluster_members_total = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    // Cluster metrics
+    state->metric_cluster_members_total = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "cluster_members_total",
         "Total number of cluster members known to this node",
         3, labels
     );
     
-    node->metric_cluster_members_active = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    state->metric_cluster_members_active = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "cluster_members_active",
         "Number of active cluster members",
         3, labels
     );
     
-    node->metric_cluster_members_suspect = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    state->metric_cluster_members_suspect = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "cluster_members_suspect",
         "Number of suspected cluster members",
         3, labels
     );
     
-    node->metric_cluster_members_dead = metrics_get_or_create_gauge(
-        node->metrics_registry,
+    state->metric_cluster_members_dead = metrics_get_or_create_gauge(
+        state->metrics_registry,
         "cluster_members_dead",
         "Number of dead cluster members",
         3, labels
     );
 
-    // CREATE HISTOGRAM METRICS (NEW)
-    
-    // Execution duration (milliseconds)
-    node->histogram_exec_duration = metrics_get_or_create_histogram(
-        node->metrics_registry,
+    // Create histogram metrics
+    state->histogram_exec_duration = metrics_get_or_create_histogram(
+        state->metrics_registry,
         "execution_duration_ms",
         "Histogram of message execution duration in milliseconds",
         HISTOGRAM_BUCKETS_LATENCY_MS,
         3, labels
     );
     
-    // Queue wait time (milliseconds)
-    node->histogram_queue_wait = metrics_get_or_create_histogram(
-        node->metrics_registry,
+    state->histogram_queue_wait = metrics_get_or_create_histogram(
+        state->metrics_registry,
         "message_queue_wait_ms",
         "Histogram of time messages spend in queue before processing",
         HISTOGRAM_BUCKETS_LATENCY_MS,
         3, labels
     );
     
-    // Message size (bytes)
-    node->histogram_message_size = metrics_get_or_create_histogram(
-        node->metrics_registry,
+    state->histogram_message_size = metrics_get_or_create_histogram(
+        state->metrics_registry,
         "message_size_bytes",
         "Histogram of message sizes in bytes",
         HISTOGRAM_BUCKETS_SIZE_BYTES,
         3, labels
     );
     
-    // Gossip round-trip time (microseconds)
-    node->histogram_gossip_rtt = metrics_get_or_create_histogram(
-        node->metrics_registry,
+    state->histogram_gossip_rtt = metrics_get_or_create_histogram(
+        state->metrics_registry,
         "gossip_rtt_us",
         "Histogram of gossip PING/ACK round-trip time in microseconds",
         HISTOGRAM_BUCKETS_LATENCY_US,
         3, labels
     );
     
-   
     LOG_INFO("All metrics created with standard labels (cluster_name, node_id, node_type)");
     
     // Start HTTP server
-    node->metrics_server = metrics_server_start(
-        node->metrics_registry,
+    state->metrics_server = metrics_server_start(
+        state->metrics_registry,
         metrics_ip,
         metrics_port
     );
     
-    if (!node->metrics_server) {
+    if (!state->metrics_server) {
         LOG_ERROR("Failed to start metrics HTTP server on %s:%u", 
                  metrics_ip, metrics_port);
         LOG_WARN("Continuing without metrics endpoint");
@@ -197,50 +193,51 @@ int node_metrics_init(unified_node_t *node, const char *metrics_addr) {
     return RESULT_OK;
 }
 
-void node_metrics_shutdown(unified_node_t *node) {
-    if (!node) return;
+void node_metrics_shutdown_ex(node_state_t *state) {
+    if (!state) return;
     
-    if (node->metrics_server) {
-        metrics_server_shutdown(node->metrics_server);
-        node->metrics_server = NULL;
+    if (state->metrics_server) {
+        metrics_server_shutdown(state->metrics_server);
+        state->metrics_server = NULL;
     }
     
-    if (node->metrics_registry) {
-        metrics_registry_destroy(node->metrics_registry);
-        node->metrics_registry = NULL;
+    if (state->metrics_registry) {
+        metrics_registry_destroy(state->metrics_registry);
+        state->metrics_registry = NULL;
     }
     
     LOG_INFO("Metrics system shutdown complete");
 }
 
-void node_metrics_update_periodic(unified_node_t *node) {
-    if (!node || !node->metrics_registry) return;
+void node_metrics_update_periodic_ex(node_state_t *state) {
+    if (!state || !state->metrics_registry) return;
+    
+    // Get subsystems
+    message_queue_t *queue = node_state_get_message_queue(state);
+    cluster_view_t *view = node_state_get_cluster_view(state);
     
     // Update uptime
-    if (node->metric_uptime_seconds) {
-        uint64_t uptime_seconds = (time_now_ms() - node->start_time_ms) / 1000;
-        metrics_gauge_set(node->metric_uptime_seconds, (double)uptime_seconds);
+    if (state->metric_uptime_seconds) {
+        uint64_t uptime_seconds = (time_now_ms() - state->start_time_ms) / 1000;
+        metrics_gauge_set(state->metric_uptime_seconds, (double)uptime_seconds);
     }
     
     // Update queue size
-    if (node->metric_queue_size) {
-        size_t queue_size = message_queue_size(&node->message_queue);
-        metrics_gauge_set(node->metric_queue_size, (double)queue_size);
+    if (state->metric_queue_size && queue) {
+        size_t queue_size = message_queue_size(queue);
+        metrics_gauge_set(state->metric_queue_size, (double)queue_size);
     }
     
     // Update active executions
-    if (node->metric_active_executions) {
-        metrics_gauge_set(node->metric_active_executions, 
-                         (double)node->active_executions);
+    if (state->metric_active_executions) {
+        metrics_gauge_set(state->metric_active_executions, 
+                         (double)state->active_executions);
     }
     
     // Update cluster metrics
-    node_metrics_update_cluster(node);
-
-        // Update cluster metrics
-    node_metrics_update_cluster(node);
+    node_metrics_update_cluster_ex(state);
     
-    // UPDATE EVENT BUS METRICS
+    // Update event bus metrics
     service_registry_t *registry = service_registry_global();
     if (registry) {
         event_bus_t *event_bus = (event_bus_t*)service_registry_get(registry,
@@ -250,8 +247,6 @@ void node_metrics_update_periodic(unified_node_t *node) {
             event_bus_stats_t stats;
             event_bus_get_stats(event_bus, &stats);
             
-            // TODO: Add event bus metrics to registry if needed
-            // For now, just log periodically
             static uint64_t last_log = 0;
             uint64_t now = time_now_ms();
             if (now - last_log > 60000) {  // Every 60 seconds
@@ -264,18 +259,21 @@ void node_metrics_update_periodic(unified_node_t *node) {
     }
 }
 
-void node_metrics_update_cluster(unified_node_t *node) {
-    if (!node || !node->cluster_view.members) return;
+void node_metrics_update_cluster_ex(node_state_t *state) {
+    if (!state) return;
     
-    pthread_rwlock_rdlock(&node->cluster_view.lock);
+    cluster_view_t *view = node_state_get_cluster_view(state);
+    if (!view || !view->members) return;
     
-    size_t total = node->cluster_view.count;
+    pthread_rwlock_rdlock(&view->lock);
+    
+    size_t total = view->count;
     size_t active = 0;
     size_t suspect = 0;
     size_t dead = 0;
     
     for (size_t i = 0; i < total; i++) {
-        cluster_member_t *member = &node->cluster_view.members[i];
+        cluster_member_t *member = &view->members[i];
         
         switch (member->status) {
             case NODE_STATUS_ALIVE:
@@ -292,19 +290,19 @@ void node_metrics_update_cluster(unified_node_t *node) {
         }
     }
     
-    pthread_rwlock_unlock(&node->cluster_view.lock);
+    pthread_rwlock_unlock(&view->lock);
     
     // Update metrics
-    if (node->metric_cluster_members_total) {
-        metrics_gauge_set(node->metric_cluster_members_total, (double)total);
+    if (state->metric_cluster_members_total) {
+        metrics_gauge_set(state->metric_cluster_members_total, (double)total);
     }
-    if (node->metric_cluster_members_active) {
-        metrics_gauge_set(node->metric_cluster_members_active, (double)active);
+    if (state->metric_cluster_members_active) {
+        metrics_gauge_set(state->metric_cluster_members_active, (double)active);
     }
-    if (node->metric_cluster_members_suspect) {
-        metrics_gauge_set(node->metric_cluster_members_suspect, (double)suspect);
+    if (state->metric_cluster_members_suspect) {
+        metrics_gauge_set(state->metric_cluster_members_suspect, (double)suspect);
     }
-    if (node->metric_cluster_members_dead) {
-        metrics_gauge_set(node->metric_cluster_members_dead, (double)dead);
+    if (state->metric_cluster_members_dead) {
+        metrics_gauge_set(state->metric_cluster_members_dead, (double)dead);
     }
 }

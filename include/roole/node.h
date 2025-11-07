@@ -11,6 +11,7 @@
 #include "roole/gossip.h"
 #include "roole/metrics.h"
 #include "roole/metrics_server.h"
+#include "roole/node_state.h"
 #include "roole/event_bus.h"
 #include <pthread.h>
 
@@ -302,5 +303,40 @@ void node_shutdown(unified_node_t *node);
 int node_bootstrap_from_config(unified_node_t *node, const roole_config_t *config);
 int node_bootstrap_with_retry(unified_node_t *node, const roole_config_t *config, 
                               int max_retries);
+
+// ============================================================================
+// NEW API: node_state_t-based functions (ADD TO END OF include/roole/node.h)
+// ============================================================================
+
+// From node_capabilities.c
+void node_detect_capabilities_ex(const roole_config_t *config,
+                                 node_capabilities_t *caps,
+                                 node_identity_t *identity);
+
+void node_print_capabilities_ex(const node_capabilities_t *caps,
+                                const node_identity_t *identity);
+
+// From node_bootstrap.c (forward declare node_state_t)
+struct node_state;
+int node_bootstrap_from_config_ex(struct node_state *state, 
+                                  const roole_config_t *config);
+int node_bootstrap_with_retry_ex(struct node_state *state,
+                                 const roole_config_t *config,
+                                 int max_retries);
+
+// From node_rpc.c
+rpc_service_entry_t* node_build_rpc_service_table_ex(const struct node_state *state);
+int node_start_rpc_servers_ex(struct node_state *state, 
+                              rpc_service_entry_t *service_table);
+
+// From node_executor.c
+int node_start_executors_ex(struct node_state *state, size_t num_threads);
+void node_stop_executors_ex(struct node_state *state);
+
+// From node_metrics.c
+int node_metrics_init_ex(struct node_state *state, const char *metrics_addr);
+void node_metrics_shutdown_ex(struct node_state *state);
+void node_metrics_update_periodic_ex(struct node_state *state);
+void node_metrics_update_cluster_ex(struct node_state *state);
 
 #endif // ROOLE_NODE_H
