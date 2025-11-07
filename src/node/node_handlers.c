@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 
 // ============================================================================
 // HELPER: GET NODE STATE FROM SERVICE REGISTRY
@@ -347,134 +348,121 @@ int handle_sync_catalog(rpc_async_context_t *context,
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
 }
 
-rpc_status_t handle_register_dag(
-    void *context,
-    const uint8_t *request,
-    size_t request_size,
-    rpc_response_t *response
-) {
-    node_state_t *state = (node_state_t*)context;
+int handle_add_dag(rpc_async_context_t *context,
+                   const uint8_t *in_data, size_t in_len) {
     
-    if (request_size < 12) {  // Minimum: dag_id(4) + name_len(4) + num_stages(4)
-        LOG_ERROR("Invalid DAG registration request (too small)");
-        response->status_code = RPC_STATUS_INVALID_REQUEST;
-        return RPC_SUCCESS;
+    node_state_t *state = get_node_state();
+    if (!state) {
+        return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
-
-    const uint8_t *ptr = request;
-    size_t remaining = request_size;
-
-    // Parse DAG ID
-    if (remaining < sizeof(uint32_t)) goto invalid;
+    
+    // Parse payload
+    const uint8_t *ptr = in_data;
+    size_t remaining = in_len;
+    
+    // Extract DAG ID
+    if (remaining < sizeof(uint32_t)) {
+        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
+    }
     uint32_t dag_id = ntohl(*(uint32_t*)ptr);
     ptr += sizeof(uint32_t);
     remaining -= sizeof(uint32_t);
-
-    // Parse name length
-    if (remaining < sizeof(uint32_t)) goto invalid;
+    
+    // Extract name length
+    if (remaining < sizeof(uint32_t)) {
+        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
+    }
     uint32_t name_len = ntohl(*(uint32_t*)ptr);
     ptr += sizeof(uint32_t);
     remaining -= sizeof(uint32_t);
-
-    // Parse name
-    if (remaining < name_len) goto invalid;
-    char dag_name[256];
-    if (name_len >= sizeof(dag_name)) {
-        LOG_ERROR("DAG name too long: %u bytes", name_len);
-        response->status_code = RPC_STATUS_INVALID_REQUEST;
-        return RPC_SUCCESS;
+    
+    // Extract name
+    if (remaining < name_len || name_len >= MAX_DAG_NAME) {
+        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
+    char dag_name[MAX_DAG_NAME];
     memcpy(dag_name, ptr, name_len);
     dag_name[name_len] = '\0';
     ptr += name_len;
     remaining -= name_len;
-
-    // Parse number of stages
-    if (remaining < sizeof(uint32_t)) goto invalid;
+    
+    // Extract num_stages
+    if (remaining < sizeof(uint32_t)) {
+        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
+    }
     uint32_t num_stages = ntohl(*(uint32_t*)ptr);
     ptr += sizeof(uint32_t);
     remaining -= sizeof(uint32_t);
-
-    LOG_INFO("[RPC] Registering DAG %u ('%s') with %u stages", dag_id, dag_name, num_stages);
-
-    // Create DAG
-    dag_t *dag = dag_create(dag_id, dag_name, num_stages);
-    if (!dag) {
-        LOG_ERROR("Failed to create DAG %u", dag_id);
-        response->status_code = RPC_STATUS_INTERNAL_ERROR;
-        return RPC_SUCCESS;
-    }
-
+    
+    // Build DAG structure
+    dag_t dag;
+    memset(&dag, 0, sizeof(dag_t));
+    dag.dag_id = dag_id;
+    safe_strncpy(dag.name, dag_name, MAX_DAG_NAME);
+    dag.version = 1;
+    dag.step_count = num_stages;
+    dag.created_at_ms = time_now_ms();
+    dag.updated_at_ms = dag.created_at_ms;
+    
     // Parse stages
-    for (uint32_t i = 0; i < num_stages; i++) {
+    for (uint32_t i = 0; i < num_stages && i < MAX_DAG_STEPS; i++) {
         // Stage ID
         if (remaining < sizeof(uint32_t)) {
-            dag_destroy(dag);
-            goto invalid;
+            return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
         }
         uint32_t stage_id = ntohl(*(uint32_t*)ptr);
         ptr += sizeof(uint32_t);
         remaining -= sizeof(uint32_t);
-
+        
+        dag.steps[i].step_id = stage_id;
+        snprintf(dag.steps[i].name, MAX_STEP_NAME, "stage_%u", stage_id);
+        snprintf(dag.steps[i].function_name, MAX_STEP_NAME, "process_stage_%u", stage_id);
+        
         // Number of dependencies
         if (remaining < sizeof(uint32_t)) {
-            dag_destroy(dag);
-            goto invalid;
+            return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
         }
         uint32_t num_deps = ntohl(*(uint32_t*)ptr);
         ptr += sizeof(uint32_t);
         remaining -= sizeof(uint32_t);
-
-        // Add stage
-        if (dag_add_stage(dag, stage_id) != 0) {
-            LOG_ERROR("Failed to add stage %u to DAG %u", stage_id, dag_id);
-            dag_destroy(dag);
-            response->status_code = RPC_STATUS_INTERNAL_ERROR;
-            return RPC_SUCCESS;
-        }
-
+        
+        dag.steps[i].dependency_count = num_deps;
+        
         // Parse dependencies
-        for (uint32_t j = 0; j < num_deps; j++) {
+        for (uint32_t j = 0; j < num_deps && j < MAX_STEP_DEPENDENCIES; j++) {
             if (remaining < sizeof(uint32_t)) {
-                dag_destroy(dag);
-                goto invalid;
+                return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
             }
             uint32_t dep_id = ntohl(*(uint32_t*)ptr);
             ptr += sizeof(uint32_t);
             remaining -= sizeof(uint32_t);
-
-            if (dag_add_dependency(dag, stage_id, dep_id) != 0) {
-                LOG_ERROR("Failed to add dependency %u->%u in DAG %u", stage_id, dep_id, dag_id);
-                dag_destroy(dag);
-                response->status_code = RPC_STATUS_INTERNAL_ERROR;
-                return RPC_SUCCESS;
-            }
+            
+            dag.steps[i].dependencies[j] = dep_id;
         }
+        
+        dag.steps[i].timeout_ms = 30000;  // 30 seconds default
+        dag.steps[i].max_retries = 3;
     }
-
-    // Validate DAG
-    if (dag_validate(dag) != 0) {
-        LOG_ERROR("DAG %u validation failed", dag_id);
-        dag_destroy(dag);
-        response->status_code = RPC_STATUS_INVALID_REQUEST;
-        return RPC_SUCCESS;
-    }
-
-    // Register in catalog
-    if (dag_catalog_register(state->dag_catalog, dag) != 0) {
-        LOG_ERROR("Failed to register DAG %u in catalog", dag_id);
-        dag_destroy(dag);
-        response->status_code = RPC_STATUS_INTERNAL_ERROR;
-        return RPC_SUCCESS;
-    }
-
-    LOG_INFO("DAG %u registered successfully (%u stages)", dag_id, num_stages);
     
-    response->status_code = RPC_STATUS_OK;
-    return RPC_SUCCESS;
-
-invalid:
-    LOG_ERROR("Invalid DAG registration request format");
-    response->status_code = RPC_STATUS_INVALID_REQUEST;
-    return RPC_SUCCESS;
+    // Validate DAG
+    if (dag_validate(&dag) != RESULT_OK) {
+        LOG_ERROR("DAG validation failed for DAG %u", dag_id);
+        return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
+    }
+    
+    // Add to catalog
+    dag_catalog_t *catalog = node_state_get_dag_catalog(state);
+    int result = dag_catalog_add(catalog, &dag);
+    
+    if (result != RESULT_OK) {
+        LOG_ERROR("Failed to add DAG %u to catalog", dag_id);
+        return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
+    }
+    
+    LOG_INFO("DAG %u '%s' registered successfully (%u stages)", 
+             dag_id, dag_name, num_stages);
+    
+    // Send success response
+    uint8_t ack = 1;
+    return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);
 }

@@ -49,6 +49,8 @@ int handle_get_execution_status(rpc_async_context_t *context,
                                 const uint8_t *in_data, size_t in_len);
 int handle_list_dags(rpc_async_context_t *context,
                      const uint8_t *in_data, size_t in_len);
+int handle_add_dag(rpc_async_context_t *context,
+                               const uint8_t *in_data, size_t in_len);
 
 // Peer-to-peer handlers (DATA channel)
 int handle_process_message(rpc_async_context_t *context,
@@ -58,25 +60,7 @@ int handle_execution_update(rpc_async_context_t *context,
 int handle_sync_catalog(rpc_async_context_t *context,
                         const uint8_t *in_data, size_t in_len);
 
-// ============================================================================
-// UNIFIED RPC SERVICE TABLE (All possible handlers)
-// ============================================================================
-/*
-static rpc_service_entry_t g_all_handlers[] = {
-    // Client operations (INGRESS only)
-    { FUNC_ID_SUBMIT_MESSAGE, handle_submit_message, 8192 },
-    { FUNC_ID_GET_STATUS, handle_get_execution_status, 16 },
-    { FUNC_ID_LIST_DAGS, handle_list_dags, 4096 },
-    
-    // Peer operations (DATA channel)
-    { FUNC_ID_PROCESS_MESSAGE, handle_process_message, 8192 },
-    { FUNC_ID_EXECUTION_UPDATE, handle_execution_update, 16 },
-    { FUNC_ID_SYNC_CATALOG, handle_sync_catalog, 8192 },
-    
-    // Sentinel
-    { 0, NULL, 0 }
-};
-*/
+
 // ============================================================================
 // DYNAMIC SERVICE TABLE BUILDER
 // ============================================================================
@@ -89,7 +73,7 @@ rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
     
     // INGRESS handlers (only if has_ingress capability)
     if (node->capabilities.has_ingress) {
-        handler_count += 3;  // SUBMIT_MESSAGE, GET_STATUS, LIST_DAGS
+        handler_count += 4;  // SUBMIT_MESSAGE, GET_STATUS, LIST_DAGS
     }
     
     // DATA handlers (always included for peer communication)
@@ -114,6 +98,9 @@ rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
         };
         table[idx++] = (rpc_service_entry_t){
             FUNC_ID_LIST_DAGS, handle_list_dags, 4096
+        };
+        table[idx++] = (rpc_service_entry_t){
+            FUNC_ID_ADD_DAG, handle_add_dag, 8192 
         };
         LOG_DEBUG("Registered INGRESS handlers (client-facing)");
     }
