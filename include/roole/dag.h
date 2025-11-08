@@ -51,12 +51,21 @@ typedef struct dag {
 // DAG CATALOG
 // ============================================================================
 
+typedef void (*dag_catalog_change_cb)(size_t new_count, void *user_data);
+
 typedef struct dag_catalog {
     dag_t *dags;
     size_t count;
     size_t capacity;
     pthread_rwlock_t lock;
+    dag_catalog_change_cb change_callback;
+    void *callback_user_data;
 } dag_catalog_t;
+
+// ADD: Function to set callback
+void dag_catalog_set_change_callback(dag_catalog_t *catalog, 
+                                     dag_catalog_change_cb callback,
+                                     void *user_data);
 
 // Catalog management
 int dag_catalog_init(dag_catalog_t *catalog, size_t capacity);

@@ -17,7 +17,7 @@
 // ============================================================================
 
 //static unified_node_t *g_node_state = NULL;
-
+/*
 void node_set_rpc_state(unified_node_t *node) {
     service_registry_t *registry = service_registry_global();
     if (!registry) {
@@ -40,7 +40,7 @@ unified_node_t* node_get_rpc_state(void) {
                                                  SERVICE_TYPE_NODE_STATE,
                                                  "unified_node");
 }
-
+*/
 // ============================================================================
 // FORWARD DECLARATIONS (Handlers defined in separate files)
 // ============================================================================
@@ -66,7 +66,7 @@ int handle_sync_catalog(rpc_async_context_t *context,
 // ============================================================================
 // DYNAMIC SERVICE TABLE BUILDER
 // ============================================================================
-
+/*
 rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
     if (!node) return NULL;
     
@@ -127,7 +127,7 @@ rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node) {
     
     return table;
 }
-
+*/
 /*
 void node_free_rpc_service_table(rpc_service_entry_t *table) {
     if (table) {
@@ -139,7 +139,7 @@ void node_free_rpc_service_table(rpc_service_entry_t *table) {
 // ============================================================================
 // RPC SERVER STARTUP (Capability-driven)
 // ============================================================================
-
+/*
 int node_start_rpc_servers(unified_node_t *node, rpc_service_entry_t *service_table) {
     if (!node || !service_table) return RESULT_ERR_INVALID;
     
@@ -172,7 +172,7 @@ int node_start_rpc_servers(unified_node_t *node, rpc_service_entry_t *service_ta
         return rpc_worker_run(node->data_port, service_table);
     }
 }
-
+*/
 // ============================================================================
 // DYNAMIC SERVICE TABLE BUILDER
 // ============================================================================

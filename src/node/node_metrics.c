@@ -13,6 +13,12 @@
 // ============================================================================
 // UNIFIED METRICS INITIALIZATION
 // ============================================================================
+static void on_dag_catalog_changed(size_t new_count, void *user_data) {
+    node_state_t *state = (node_state_t*)user_data;
+    if (state && state->metric_dag_catalog_size) {
+        metrics_gauge_set(state->metric_dag_catalog_size, (double)new_count);
+    }
+}
 
 int node_metrics_init_ex(node_state_t *state, const char *metrics_addr) {
     if (!state) return RESULT_ERR_INVALID;
@@ -138,9 +144,14 @@ int node_metrics_init_ex(node_state_t *state, const char *metrics_addr) {
         3, labels
     );
 
+    state->metric_dag_catalog_size = metrics_get_or_create_gauge(
+        state->metrics_registry,
+        "dag_catalog_size",
+        "Number of DAGs in the catalog",
+        3, labels
+    );
+
     // Create histogram metrics
-    /**** TODO HISTOGRAM ****/
-    /*
     state->histogram_exec_duration = metrics_get_or_create_histogram(
         state->metrics_registry,
         "execution_duration_ms",
@@ -172,9 +183,14 @@ int node_metrics_init_ex(node_state_t *state, const char *metrics_addr) {
         HISTOGRAM_BUCKETS_LATENCY_US,
         3, labels
     );
-    */
-    LOG_INFO("All metrics created with standard labels (cluster_name, node_id, node_type)");
     
+    LOG_INFO("All metrics created with standard labels (cluster_name, node_id, node_type)");
+
+    dag_catalog_t *catalog = node_state_get_dag_catalog(state);
+    if (catalog) {
+        dag_catalog_set_change_callback(catalog, on_dag_catalog_changed, state);
+    }
+
     // Start HTTP server
     state->metrics_server = metrics_server_start(
         state->metrics_registry,

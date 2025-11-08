@@ -11,6 +11,7 @@
 #define MAX_METRIC_NAME_LEN 128
 #define MAX_METRIC_HELP_LEN 256
 #define MAX_METRICS_PER_REGISTRY 256
+#define HISTOGRAM_MAX_BUCKETS 16
 #define MAX_LABEL_NAME_LEN 64
 #define MAX_LABEL_VALUE_LEN 128
 #define MAX_LABELS_PER_METRIC 8
@@ -47,17 +48,9 @@ typedef struct metrics {
     int active;
 } metrics_t;
 
-typedef struct metrics_registry {
-    metrics_t metrics[MAX_METRICS_PER_REGISTRY];
-    size_t count;
-    pthread_mutex_t lock;
-} metrics_registry_t;
-
 // ============================================================================
 // HISTOGRAM CONFIGURATION
 // ============================================================================
-
-#define HISTOGRAM_MAX_BUCKETS 16
 
 // Predefined bucket configurations
 typedef enum {
@@ -88,11 +81,22 @@ typedef struct histogram_metric {
     // Bucket counters (atomic)
     _Atomic uint64_t bucket_counts[HISTOGRAM_MAX_BUCKETS];
     _Atomic uint64_t count;
-    _Atomic double sum;
+    _Atomic uint64_t sum;
     
     pthread_mutex_t lock;
     int active;
 } histogram_metric_t;
+
+typedef struct metrics_registry {
+    metrics_t metrics[MAX_METRICS_PER_REGISTRY];
+    histogram_metric_t histograms[MAX_METRICS_PER_REGISTRY]; 
+    size_t count;
+    size_t histogram_count;
+    pthread_mutex_t lock;
+} metrics_registry_t;
+
+
+
 
 // ============================================================================
 // HISTOGRAM API
@@ -114,7 +118,7 @@ histogram_metric_t* metrics_get_or_create_histogram(
  * Observe a value in the histogram
  * Thread-safe: uses atomic operations
  */
-void metrics_histogram_observe(histogram_metric_t *metric, double value);
+void metrics_histogram_observe(histogram_metric_t *metric, int value);
 
 /**
  * Get predefined bucket configuration

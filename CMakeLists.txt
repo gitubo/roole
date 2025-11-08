@@ -56,7 +56,6 @@ add_library(roole_node STATIC
     src/node/node_handlers.c
     src/node/node_executor.c
     src/node/node_capabilities.c
-    src/node/node_core.c
     src/node/node_bootstrap.c
     src/node/node_state.c
 )

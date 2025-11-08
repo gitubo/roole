@@ -46,8 +46,6 @@ void* node_executor_thread_fn(void *arg) {
         struct timespec queue_pop_time;
         timespec_now(&queue_pop_time);
         
-        // OLD: message_queue_pop(&node->message_queue, &message, 1000);
-        // NEW:
         int ret = message_queue_pop(queue, &message, 1000);
         
         if (ret == RESULT_ERR_TIMEOUT || ret == RESULT_ERR_EMPTY) {
@@ -88,17 +86,13 @@ void* node_executor_thread_fn(void *arg) {
         }
         
         // Record metrics
-        /**** TODO HISTOGRAM */
-        /*
         if (state->histogram_queue_wait) {
-            metrics_histogram_observe(state->histogram_queue_wait, (double)wait_time_ms);
+            metrics_histogram_observe(state->histogram_queue_wait, wait_time_ms);
         }
         
         if (state->histogram_message_size) {
-            metrics_histogram_observe(state->histogram_message_size,
-                                     (double)message.message_len);
+            metrics_histogram_observe(state->histogram_message_size, message.message_len);
         }
-        */
         
         // Increment active executions
         __sync_fetch_and_add(&state->active_executions, 1);
@@ -149,13 +143,10 @@ void* node_executor_thread_fn(void *arg) {
             timespec_now(&exec_end_time);
             double exec_duration_us = time_diff_us(&exec_start_time, &exec_end_time);
             
-            /***** TODO HISTOGRAM */
-            /*
             if (state->histogram_exec_duration) {
-                double exec_duration_ms = exec_duration_us / 1000.0;
+                uint64_t exec_duration_ms = (uint64_t)(exec_duration_us / 1000.0);
                 metrics_histogram_observe(state->histogram_exec_duration, exec_duration_ms);
             }
-            */
             
             if (exec_result == RESULT_OK) {
                 status = EXEC_STATUS_COMPLETED;
@@ -276,7 +267,7 @@ void* node_executor_thread_fn(void *arg) {
 // ============================================================================
 // EXECUTOR MANAGEMENT
 // ============================================================================
-
+/*
 int node_start_executors(unified_node_t *node) {
     if (!node || !node->capabilities.can_execute) {
         LOG_INFO("Execution capability disabled, no executor threads started");
@@ -334,7 +325,7 @@ void node_stop_executors(unified_node_t *node) {
     
     LOG_INFO("All executor threads stopped");
 }
-
+*/
 int node_start_executors_ex(node_state_t *state, size_t num_threads) {
     if (!state) return RESULT_ERR_INVALID;
     

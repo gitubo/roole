@@ -263,47 +263,49 @@ void node_metrics_update_cluster(unified_node_t *node);
 // ============================================================================
 // RPC MANAGEMENT API
 // ============================================================================
-
+/*
 void node_set_rpc_state(unified_node_t *node);
 unified_node_t* node_get_rpc_state(void);
 
 rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node);
+*/
 void node_free_rpc_service_table(rpc_service_entry_t *table);
 
-int node_start_rpc_servers(unified_node_t *node, rpc_service_entry_t *service_table);
+//int node_start_rpc_servers(unified_node_t *node, rpc_service_entry_t *service_table);
 
 // ============================================================================
 // EXECUTOR API
 // ============================================================================
 
 void* node_executor_thread_fn(void *arg);
+/*
 int node_start_executors(unified_node_t *node);
 void node_stop_executors(unified_node_t *node);
-
+*/
 // ============================================================================
 // CAPABILITY DETECTION API
 // ============================================================================
-
+/*
 void node_detect_capabilities(unified_node_t *node, const roole_config_t *config);
 void node_print_capabilities(const unified_node_t *node);
-
+*/
 // ============================================================================
 // UNIFIED NODE LIFECYCLE API
 // ============================================================================
-
+/*
 int node_init(unified_node_t *node, const roole_config_t *config, 
               size_t num_executor_threads);
 int node_start(unified_node_t *node);
 void node_shutdown(unified_node_t *node);
-
+*/
 // ============================================================================
 // BOOTSTRAP API
 // ============================================================================
-
+/*
 int node_bootstrap_from_config(unified_node_t *node, const roole_config_t *config);
 int node_bootstrap_with_retry(unified_node_t *node, const roole_config_t *config, 
                               int max_retries);
-
+*/
 // ============================================================================
 // NEW API: node_state_t-based functions (ADD TO END OF include/roole/node.h)
 // ============================================================================

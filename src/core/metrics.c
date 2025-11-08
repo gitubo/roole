@@ -6,6 +6,7 @@
 #include "roole/metrics.h"
 #include "roole/common.h"
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -245,22 +246,20 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
     
     pthread_mutex_lock(&reg->lock);
     
-    // Render each metric
+    // Render counter/gauge metrics (existing code)
     for (size_t i = 0; i < MAX_METRICS_PER_REGISTRY; i++) {
         if (!reg->metrics[i].active) continue;
         
         metrics_t *m = &reg->metrics[i];
-        
         pthread_mutex_lock(&m->lock);
         
-        // Check buffer space (need at least 512 bytes for safety)
         if (offset + 512 >= buffer_size) {
             LOG_WARN("Metrics buffer full, truncating output");
             pthread_mutex_unlock(&m->lock);
             break;
         }
         
-        // Format: # HELP metric_name help text
+        // HELP
         int written = snprintf(buffer + offset, buffer_size - offset,
                               "# HELP %s %s\n", m->name, m->help);
         if (written < 0 || (size_t)written >= buffer_size - offset) {
@@ -269,7 +268,7 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
         }
         offset += written;
         
-        // Format: # TYPE metric_name counter|gauge
+        // TYPE
         written = snprintf(buffer + offset, buffer_size - offset,
                           "# TYPE %s %s\n",
                           m->name,
@@ -280,7 +279,7 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
         }
         offset += written;
         
-        // Format: metric_name{label1="value1",label2="value2"} value
+        // Metric name
         written = snprintf(buffer + offset, buffer_size - offset, "%s", m->name);
         if (written < 0 || (size_t)written >= buffer_size - offset) {
             pthread_mutex_unlock(&m->lock);
@@ -288,7 +287,7 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
         }
         offset += written;
         
-        // Add labels if present
+        // Labels
         if (m->num_labels > 0) {
             written = snprintf(buffer + offset, buffer_size - offset, "{");
             if (written < 0 || (size_t)written >= buffer_size - offset) {
@@ -318,11 +317,10 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
             offset += written;
         }
         
-        // CRITICAL FIX: Add value on same line (with space before it)
+        // Value
         written = snprintf(buffer + offset, buffer_size - offset,
                           " %.0f\n", m->value);
         if (written < 0 || (size_t)written >= buffer_size - offset) {
-            LOG_WARN("Failed to write metric value for %s", m->name);
             pthread_mutex_unlock(&m->lock);
             break;
         }
@@ -331,9 +329,217 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
         pthread_mutex_unlock(&m->lock);
     }
     
+    // **NEW: Render histogram metrics**
+    for (size_t i = 0; i < reg->histogram_count; i++) {
+        if (!reg->histograms[i].active) continue;
+        
+        histogram_metric_t *h = &reg->histograms[i];
+        pthread_mutex_lock(&h->lock);
+        
+        if (offset + 1024 >= buffer_size) {
+            LOG_WARN("Metrics buffer full, truncating histograms");
+            pthread_mutex_unlock(&h->lock);
+            break;
+        }
+        
+        // HELP
+        int written = snprintf(buffer + offset, buffer_size - offset,
+                              "# HELP %s %s\n", h->name, h->help);
+        offset += written;
+        
+        // TYPE
+        written = snprintf(buffer + offset, buffer_size - offset,
+                          "# TYPE %s histogram\n", h->name);
+        offset += written;
+        
+        // Build label string (reusable for all histogram lines)
+        char label_str[512] = {0};
+        if (h->num_labels > 0) {
+            size_t label_offset = 0;
+            for (size_t j = 0; j < h->num_labels; j++) {
+                label_offset += snprintf(label_str + label_offset, 
+                                        sizeof(label_str) - label_offset,
+                                        "%s%s=\"%s\"",
+                                        j > 0 ? "," : "",
+                                        h->labels[j].name,
+                                        h->labels[j].value);
+            }
+        }
+        
+        // Render buckets
+        for (size_t j = 0; j < h->buckets.count; j++) {
+            if (offset + 256 >= buffer_size) break;
+            
+            // Format: metric_name_bucket{labels,le="upper_bound"} count
+            written = snprintf(buffer + offset, buffer_size - offset,
+                              "%s_bucket{%s%sle=\"",
+                              h->name,
+                              label_str,
+                              h->num_labels > 0 ? "," : "");
+            offset += written;
+            
+            // Format upper bound (+Inf for last bucket)
+            if (isinf(h->buckets.upper_bounds[j])) {
+                written = snprintf(buffer + offset, buffer_size - offset, "+Inf");
+            } else {
+                written = snprintf(buffer + offset, buffer_size - offset,
+                                  "%.2f", h->buckets.upper_bounds[j]);
+            }
+            offset += written;
+            
+            written = snprintf(buffer + offset, buffer_size - offset,
+                              "\"} %lu\n", (unsigned long)h->bucket_counts[j]);
+            offset += written;
+        }
+        
+        // Render _sum
+        written = snprintf(buffer + offset, buffer_size - offset,
+                          "%s_sum{%s} %.6f\n",
+                          h->name, label_str, (double)h->sum);
+        offset += written;
+        
+        // Render _count
+        written = snprintf(buffer + offset, buffer_size - offset,
+                          "%s_count{%s} %lu\n",
+                          h->name, label_str, (unsigned long)h->count);
+        offset += written;
+        
+        pthread_mutex_unlock(&h->lock);
+    }
+    
 done:
     pthread_mutex_unlock(&reg->lock);
     
     LOG_DEBUG("Rendered %zu bytes of metrics", offset);
     return buffer;
+}
+
+histogram_metric_t* metrics_get_or_create_histogram(
+    metrics_registry_t *reg,
+    const char *name,
+    const char *help,
+    histogram_buckets_type_t buckets_type,
+    size_t num_labels,
+    const metric_label_t *labels) {
+    
+    if (!reg || !name) return NULL;
+    
+    char metric_key[512];
+    generate_metric_key(metric_key, sizeof(metric_key), name, num_labels, labels);
+    
+    pthread_mutex_lock(&reg->lock);
+    
+    // Search existing
+    for (size_t i = 0; i < reg->histogram_count; i++) {
+        if (!reg->histograms[i].active) continue;
+        if (strcmp(reg->histograms[i].name, name) == 0) {
+            // Match labels
+            int match = 1;
+            for (size_t j = 0; j < num_labels; j++) {
+                if (strcmp(reg->histograms[i].labels[j].name, labels[j].name) != 0 ||
+                    strcmp(reg->histograms[i].labels[j].value, labels[j].value) != 0) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (match) {
+                pthread_mutex_unlock(&reg->lock);
+                return &reg->histograms[i];
+            }
+        }
+    }
+    
+    // Create new
+    if (reg->histogram_count >= MAX_METRICS_PER_REGISTRY) {
+        pthread_mutex_unlock(&reg->lock);
+        return NULL;
+    }
+    
+    histogram_metric_t *h = &reg->histograms[reg->histogram_count];
+    memset(h, 0, sizeof(histogram_metric_t));
+    
+    safe_strncpy(h->name, name, MAX_METRIC_NAME_LEN);
+    safe_strncpy(h->help, help, MAX_METRIC_HELP_LEN);
+    h->num_labels = num_labels;
+    for (size_t i = 0; i < num_labels; i++) {
+        h->labels[i] = labels[i];
+    }
+    
+    h->buckets = metrics_get_buckets(buckets_type);
+    h->count = 0;
+    h->sum = 0;
+    for (size_t i = 0; i < h->buckets.count; i++) {
+        h->bucket_counts[i] = 0;
+    }
+    
+    pthread_mutex_init(&h->lock, NULL);
+    h->active = 1;
+    reg->histogram_count++;
+    
+    pthread_mutex_unlock(&reg->lock);
+    return h;
+}
+
+histogram_buckets_t metrics_get_buckets(histogram_buckets_type_t type) {
+    histogram_buckets_t buckets = {0};
+    
+    switch (type) {
+        case HISTOGRAM_BUCKETS_LATENCY_MS:
+            buckets.count = 9;
+            buckets.upper_bounds[0] = 1;
+            buckets.upper_bounds[1] = 5;
+            buckets.upper_bounds[2] = 10;
+            buckets.upper_bounds[3] = 50;
+            buckets.upper_bounds[4] = 100;
+            buckets.upper_bounds[5] = 500;
+            buckets.upper_bounds[6] = 1000;
+            buckets.upper_bounds[7] = 5000;
+            buckets.upper_bounds[8] = INFINITY;
+            break;
+            
+        case HISTOGRAM_BUCKETS_LATENCY_US:
+            buckets.count = 8;
+            buckets.upper_bounds[0] = 100;
+            buckets.upper_bounds[1] = 500;
+            buckets.upper_bounds[2] = 1000;
+            buckets.upper_bounds[3] = 5000;
+            buckets.upper_bounds[4] = 10000;
+            buckets.upper_bounds[5] = 50000;
+            buckets.upper_bounds[6] = 100000;
+            buckets.upper_bounds[7] = INFINITY;
+            break;
+            
+        case HISTOGRAM_BUCKETS_SIZE_BYTES:
+            buckets.count = 9;
+            buckets.upper_bounds[0] = 256;
+            buckets.upper_bounds[1] = 1024;
+            buckets.upper_bounds[2] = 4096;
+            buckets.upper_bounds[3] = 16384;
+            buckets.upper_bounds[4] = 65536;
+            buckets.upper_bounds[5] = 262144;
+            buckets.upper_bounds[6] = 1048576;
+            buckets.upper_bounds[7] = 4194304;
+            buckets.upper_bounds[8] = INFINITY;
+            break;
+            
+        case HISTOGRAM_BUCKETS_CUSTOM:
+            // User must set manually
+            buckets.count = 0;
+            break;
+    }
+    return buckets;
+}
+
+void metrics_histogram_observe(histogram_metric_t *metric, int value) {
+    if (!metric) return;
+    
+    __sync_fetch_and_add(&metric->count, 1);
+    __sync_fetch_and_add(&metric->sum, value);  
+    
+    for (size_t i = 0; i < metric->buckets.count; i++) {
+        if (value <= metric->buckets.upper_bounds[i]) {
+            __sync_fetch_and_add(&metric->bucket_counts[i], 1);
+            break;
+        }
+    }
 }

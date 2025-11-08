@@ -79,6 +79,7 @@ typedef struct node_state {
     metrics_t *metric_queue_size;
     metrics_t *metric_active_executions;
     metrics_t *metric_uptime_seconds;
+    metrics_t *metric_dag_catalog_size;
     
     histogram_metric_t *histogram_exec_duration;
     histogram_metric_t *histogram_queue_wait;

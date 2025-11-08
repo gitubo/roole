@@ -8,6 +8,18 @@
 // ============================================================================
 // DAG CATALOG IMPLEMENTATION
 // ============================================================================
+// Add new function:
+void dag_catalog_set_change_callback(dag_catalog_t *catalog,
+                                     dag_catalog_change_cb callback,
+                                     void *user_data) {
+    if (!catalog) return;
+    
+    pthread_rwlock_wrlock(&catalog->lock);
+    catalog->change_callback = callback;
+    catalog->callback_user_data = user_data;
+    pthread_rwlock_unlock(&catalog->lock);
+}
+
 
 int dag_catalog_init(dag_catalog_t *catalog, size_t capacity) {
     if (!catalog || capacity == 0) return RESULT_ERR_INVALID;
@@ -28,6 +40,7 @@ int dag_catalog_init(dag_catalog_t *catalog, size_t capacity) {
     }
     
     LOG_INFO("DAG catalog initialized (capacity: %zu)", capacity);
+
     return RESULT_OK;
 }
 
@@ -134,6 +147,10 @@ int dag_catalog_add(dag_catalog_t *catalog, const dag_t *dag) {
     }
     
     catalog->count++;
+
+    if (catalog->change_callback) {
+        catalog->change_callback(catalog->count, catalog->callback_user_data);
+    }
     
     pthread_rwlock_unlock(&catalog->lock);
     
@@ -226,6 +243,10 @@ int dag_catalog_remove(dag_catalog_t *catalog, rule_id_t dag_id) {
     }
     
     catalog->count--;
+
+    if (catalog->change_callback) {
+        catalog->change_callback(catalog->count, catalog->callback_user_data);
+    }
     
     pthread_rwlock_unlock(&catalog->lock);
     

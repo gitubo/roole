@@ -247,12 +247,6 @@ static int setup_server_socket(const char *bind_addr, uint16_t port) {
     }
 #endif
     
-    // ❌ REMOVED: Do NOT set non-blocking here
-    // int flags = fcntl(server_fd, F_GETFL, 0);
-    // if (flags >= 0) {
-    //     fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
-    // }
-    
     // Prepare address structure
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
