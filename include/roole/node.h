@@ -1,4 +1,5 @@
-// include/roole/node.h
+// include/roole/node.h - CLEANED UP VERSION
+// Remove all unified_node_t definitions and old API functions
 
 #ifndef ROOLE_NODE_H
 #define ROOLE_NODE_H
@@ -15,28 +16,25 @@
 #include "roole/event_bus.h"
 #include <pthread.h>
 
-#define MAX_WORKERS 256  // Legacy compatibility
-#define MAX_WORKER_QUEUE_SIZE 1000  // Legacy compatibility
+// ============================================================================
+// FORWARD DECLARATIONS (for node_state.h)
+// ============================================================================
+
+typedef struct node_capabilities node_capabilities_t;
+typedef struct peer_pool peer_pool_t;
+typedef struct execution_tracker execution_tracker_t;
+typedef struct message_queue message_queue_t;
+typedef struct membership_handle membership_handle_t;
 
 // ============================================================================
-// NODE CAPABILITIES (Configuration-driven flags)
-// ============================================================================
-/*
-typedef struct node_capabilities {
-    int has_ingress;        // Accepts external client requests
-    int can_execute;        // Processes messages (runs executor threads)
-    int can_route;          // Routes messages to other nodes
-} node_capabilities_t;
-*/
-// ============================================================================
-// PEER INFO (Replaces worker_info_t - tracks all cluster nodes)
+// PEER INFO
 // ============================================================================
 
 #define MAX_PEERS 512
 
 typedef struct peer_info {
     node_id_t node_id;
-    node_type_t node_type;  // Legacy - will be deprecated
+    node_type_t node_type;
     char ip[MAX_IP_LEN];
     uint16_t gossip_port;
     uint16_t data_port;
@@ -48,18 +46,18 @@ typedef struct peer_info {
     
     rpc_channel_t *data_channel;
     
-    node_capabilities_t capabilities;  // Peer's capabilities
+    node_capabilities_t capabilities;
 } peer_info_t;
 
-typedef struct peer_pool {
+struct peer_pool {
     peer_info_t *peers;
     size_t count;
     size_t capacity;
     pthread_mutex_t lock;
-} peer_pool_t;
+};
 
 // ============================================================================
-// MESSAGE QUEUE (Unified for all nodes)
+// MESSAGE QUEUE
 // ============================================================================
 
 #define MAX_NODE_QUEUE_SIZE 1000
@@ -74,7 +72,7 @@ typedef struct message {
     node_id_t sender_id;
 } message_t;
 
-typedef struct message_queue {
+struct message_queue {
     message_t *messages;
     size_t head;
     size_t tail;
@@ -83,10 +81,10 @@ typedef struct message_queue {
     pthread_mutex_t lock;
     pthread_cond_t not_empty;
     pthread_cond_t not_full;
-} message_queue_t;
+};
 
 // ============================================================================
-// EXECUTION TRACKER (All nodes track executions)
+// EXECUTION TRACKER
 // ============================================================================
 
 #define MAX_PENDING_EXECUTIONS 10000
@@ -119,86 +117,12 @@ typedef struct execution_record {
     int active;
 } execution_record_t;
 
-typedef struct execution_tracker {
+struct execution_tracker {
     execution_record_t *records;
     size_t capacity;
     execution_id_t next_exec_id;
     pthread_rwlock_t lock;
-} execution_tracker_t;
-
-// ============================================================================
-// UNIFIED NODE STATE
-// ============================================================================
-
-typedef struct unified_node {
-    // Identity
-    node_id_t node_id;
-    node_type_t node_type;
-    char cluster_name[MAX_CONFIG_STRING];
-    char bind_addr[MAX_IP_LEN];
-    
-    // Ports
-    uint16_t gossip_port;
-    uint16_t data_port;
-    uint16_t ingress_port;  // 0 if not enabled
-    uint16_t metrics_port;  // 0 if not enabled
-    
-    // Capabilities
-    node_capabilities_t capabilities;
-    
-    // DAG catalog (all nodes maintain)
-    dag_catalog_t dag_catalog;
-    uint64_t catalog_version;
-    
-    // Execution tracking
-    execution_tracker_t exec_tracker;
-    
-    // Message processing
-    message_queue_t message_queue;
-    uint32_t active_executions;
-    
-    // Peer management
-    peer_pool_t peer_pool;
-    
-    // Cluster membership
-    cluster_view_t cluster_view;
-    membership_handle_t *membership;
-    gossip_engine_t *gossip_engine;
-    
-    // Metrics
-    metrics_registry_t *metrics_registry;
-    metrics_server_t *metrics_server;
-    
-    metrics_t *metric_messages_processed;
-    metrics_t *metric_messages_failed;
-    metrics_t *metric_messages_routed;
-    metrics_t *metric_queue_size;
-    metrics_t *metric_active_executions;
-    metrics_t *metric_uptime_seconds;
-    
-    metrics_t *metric_cluster_members_total;
-    metrics_t *metric_cluster_members_active;
-    metrics_t *metric_cluster_members_suspect;
-    metrics_t *metric_cluster_members_dead;
-
-    histogram_metric_t *histogram_exec_duration;
-    histogram_metric_t *histogram_queue_wait;
-    histogram_metric_t *histogram_message_size;
-    histogram_metric_t *histogram_gossip_rtt;
-
-    pthread_t metrics_update_thread;
-    
-    // Executor threads
-    pthread_t *executor_threads;
-    size_t num_executor_threads;
-    
-    // Background threads
-    pthread_t cleanup_thread;
-    
-    uint64_t start_time_ms;
-    int shutdown_flag;
-    
-} unified_node_t;
+};
 
 // ============================================================================
 // PEER POOL API
@@ -252,65 +176,34 @@ int execution_tracker_remove(execution_tracker_t *tracker, execution_id_t exec_i
 size_t execution_tracker_cleanup_completed(execution_tracker_t *tracker);
 
 // ============================================================================
-// METRICS API
+// METRICS API (node_state_t based)
 // ============================================================================
 
-int node_metrics_init(unified_node_t *node, const char *metrics_addr);
-void node_metrics_shutdown(unified_node_t *node);
-void node_metrics_update_periodic(unified_node_t *node);
-void node_metrics_update_cluster(unified_node_t *node);
+int node_metrics_init_ex(node_state_t *state, const char *metrics_addr);
+void node_metrics_shutdown_ex(node_state_t *state);
+void node_metrics_update_periodic_ex(node_state_t *state);
+void node_metrics_update_cluster_ex(node_state_t *state);
 
 // ============================================================================
-// RPC MANAGEMENT API
+// RPC MANAGEMENT API (node_state_t based)
 // ============================================================================
-/*
-void node_set_rpc_state(unified_node_t *node);
-unified_node_t* node_get_rpc_state(void);
 
-rpc_service_entry_t* node_build_rpc_service_table(const unified_node_t *node);
-*/
+rpc_service_entry_t* node_build_rpc_service_table_ex(const node_state_t *state);
 void node_free_rpc_service_table(rpc_service_entry_t *table);
-
-//int node_start_rpc_servers(unified_node_t *node, rpc_service_entry_t *service_table);
+int node_start_rpc_servers_ex(node_state_t *state, rpc_service_entry_t *service_table);
 
 // ============================================================================
-// EXECUTOR API
+// EXECUTOR API (node_state_t based)
 // ============================================================================
 
 void* node_executor_thread_fn(void *arg);
-/*
-int node_start_executors(unified_node_t *node);
-void node_stop_executors(unified_node_t *node);
-*/
+int node_start_executors_ex(node_state_t *state, size_t num_threads);
+void node_stop_executors_ex(node_state_t *state);
+
 // ============================================================================
-// CAPABILITY DETECTION API
-// ============================================================================
-/*
-void node_detect_capabilities(unified_node_t *node, const roole_config_t *config);
-void node_print_capabilities(const unified_node_t *node);
-*/
-// ============================================================================
-// UNIFIED NODE LIFECYCLE API
-// ============================================================================
-/*
-int node_init(unified_node_t *node, const roole_config_t *config, 
-              size_t num_executor_threads);
-int node_start(unified_node_t *node);
-void node_shutdown(unified_node_t *node);
-*/
-// ============================================================================
-// BOOTSTRAP API
-// ============================================================================
-/*
-int node_bootstrap_from_config(unified_node_t *node, const roole_config_t *config);
-int node_bootstrap_with_retry(unified_node_t *node, const roole_config_t *config, 
-                              int max_retries);
-*/
-// ============================================================================
-// NEW API: node_state_t-based functions (ADD TO END OF include/roole/node.h)
+// CAPABILITY DETECTION API (node_state_t based)
 // ============================================================================
 
-// From node_capabilities.c
 void node_detect_capabilities_ex(const roole_config_t *config,
                                  node_capabilities_t *caps,
                                  node_identity_t *identity);
@@ -318,27 +211,14 @@ void node_detect_capabilities_ex(const roole_config_t *config,
 void node_print_capabilities_ex(const node_capabilities_t *caps,
                                 const node_identity_t *identity);
 
-// From node_bootstrap.c (forward declare node_state_t)
-struct node_state;
-int node_bootstrap_from_config_ex(struct node_state *state, 
+// ============================================================================
+// BOOTSTRAP API (node_state_t based)
+// ============================================================================
+
+int node_bootstrap_from_config_ex(node_state_t *state, 
                                   const roole_config_t *config);
-int node_bootstrap_with_retry_ex(struct node_state *state,
+int node_bootstrap_with_retry_ex(node_state_t *state,
                                  const roole_config_t *config,
                                  int max_retries);
-
-// From node_rpc.c
-rpc_service_entry_t* node_build_rpc_service_table_ex(const struct node_state *state);
-int node_start_rpc_servers_ex(struct node_state *state, 
-                              rpc_service_entry_t *service_table);
-
-// From node_executor.c
-int node_start_executors_ex(struct node_state *state, size_t num_threads);
-void node_stop_executors_ex(struct node_state *state);
-
-// From node_metrics.c
-int node_metrics_init_ex(struct node_state *state, const char *metrics_addr);
-void node_metrics_shutdown_ex(struct node_state *state);
-void node_metrics_update_periodic_ex(struct node_state *state);
-void node_metrics_update_cluster_ex(struct node_state *state);
 
 #endif // ROOLE_NODE_H

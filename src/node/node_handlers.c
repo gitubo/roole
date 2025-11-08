@@ -355,7 +355,7 @@ int handle_add_dag(rpc_async_context_t *context,
         return rpc_send_async_response(context, RPC_STATUS_INTERNAL_ERROR, NULL, 0);
     }
     
-    // Parse payload
+    // Parse payload (unchanged)
     const uint8_t *ptr = in_data;
     size_t remaining = in_len;
     
@@ -449,7 +449,7 @@ int handle_add_dag(rpc_async_context_t *context,
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
-    // Add to catalog
+    // Add to local catalog
     dag_catalog_t *catalog = node_state_get_dag_catalog(state);
     int result = dag_catalog_add(catalog, &dag);
     
@@ -460,6 +460,82 @@ int handle_add_dag(rpc_async_context_t *context,
     
     LOG_INFO("DAG %u '%s' registered successfully (%u stages)", 
              dag_id, dag_name, num_stages);
+    
+    // ✅ NEW: PROPAGATE DAG TO ALL WORKERS
+    LOG_INFO("Propagating DAG %u to all workers...", dag_id);
+    
+    peer_pool_t *pool = node_state_get_peer_pool(state);
+    const node_identity_t *identity = node_state_get_identity(state);
+    
+    // Get list of all alive workers
+    node_id_t worker_ids[MAX_PEERS];
+    size_t worker_count = peer_pool_list_by_capability(pool, 1, worker_ids, MAX_PEERS);
+    
+    LOG_INFO("Found %zu workers to sync DAG catalog", worker_count);
+    
+    // Serialize DAG
+    uint8_t dag_buffer[8192];
+    size_t serialized_size = dag_serialize(&dag, dag_buffer, sizeof(dag_buffer));
+    
+    if (serialized_size == 0) {
+        LOG_WARN("Failed to serialize DAG for propagation");
+    } else {
+        // Send to each worker
+        for (size_t i = 0; i < worker_count; i++) {
+            peer_info_t *peer = peer_pool_get(pool, worker_ids[i]);
+            
+            if (!peer || !peer->data_channel) {
+                LOG_WARN("Worker %u not available for DAG sync", worker_ids[i]);
+                peer_pool_release(pool);
+                continue;
+            }
+            
+            // Build SYNC_CATALOG RPC message
+            size_t rpc_msg_len = rpc_pack_message(
+                peer->data_channel->tx_buffer,
+                identity->node_id,
+                dag_id,  // Use DAG ID as request ID
+                RPC_TYPE_REQUEST,
+                RPC_STATUS_UNKNOWN,
+                FUNC_ID_SYNC_CATALOG,
+                dag_buffer,
+                serialized_size
+            );
+            
+            // Send to worker
+            ssize_t sent = send(peer->data_channel->socket_fd,
+                               peer->data_channel->tx_buffer, rpc_msg_len, 0);
+            
+            peer_pool_release(pool);
+            
+            if (sent > 0) {
+                LOG_INFO("DAG %u synced to worker %u", dag_id, worker_ids[i]);
+            } else {
+                LOG_WARN("Failed to sync DAG %u to worker %u", dag_id, worker_ids[i]);
+            }
+        }
+    }
+    
+    // ✅ NEW: Publish event for DAG addition
+    service_registry_t *registry = service_registry_global();
+    if (registry) {
+        event_bus_t *event_bus = (event_bus_t*)service_registry_get(registry,
+                                                                     SERVICE_TYPE_EVENT_BUS,
+                                                                     "main");
+        if (event_bus) {
+            event_t event = {
+                .type = EVENT_TYPE_CATALOG_UPDATED,
+                .timestamp_ms = time_now_ms(),
+                .source_node_id = identity->node_id,
+                .data.catalog = {
+                    .dag_id = dag_id,
+                    .version = dag.version
+                }
+            };
+            safe_strncpy(event.data.catalog.dag_name, dag_name, 64);
+            event_bus_publish(event_bus, &event);
+        }
+    }
     
     uint8_t ack = 1;
     return rpc_send_async_response(context, RPC_STATUS_SUCCESS, &ack, 1);

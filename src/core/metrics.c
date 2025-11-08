@@ -246,7 +246,10 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
     
     pthread_mutex_lock(&reg->lock);
     
-    // Render counter/gauge metrics (existing code)
+    // ========================================================================
+    // RENDER COUNTER/GAUGE METRICS
+    // ========================================================================
+    
     for (size_t i = 0; i < MAX_METRICS_PER_REGISTRY; i++) {
         if (!reg->metrics[i].active) continue;
         
@@ -329,18 +332,29 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
         pthread_mutex_unlock(&m->lock);
     }
     
-    // **NEW: Render histogram metrics**
+    // ========================================================================
+    // RENDER HISTOGRAM METRICS (FIXED)
+    // ========================================================================
+    
+    LOG_DEBUG("Rendering %zu histograms", reg->histogram_count);
+    
     for (size_t i = 0; i < reg->histogram_count; i++) {
-        if (!reg->histograms[i].active) continue;
-        
         histogram_metric_t *h = &reg->histograms[i];
+        
+        if (!h->active) {
+            LOG_DEBUG("  Histogram %zu inactive, skipping", i);
+            continue;
+        }
+        
         pthread_mutex_lock(&h->lock);
         
-        if (offset + 1024 >= buffer_size) {
-            LOG_WARN("Metrics buffer full, truncating histograms");
+        if (offset + 2048 >= buffer_size) {
+            LOG_WARN("Buffer full, cannot render histogram %s", h->name);
             pthread_mutex_unlock(&h->lock);
             break;
         }
+        
+        LOG_DEBUG("Rendering histogram: %s (buckets=%zu)", h->name, h->buckets.count);
         
         // HELP
         int written = snprintf(buffer + offset, buffer_size - offset,
@@ -387,21 +401,28 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
             }
             offset += written;
             
+            // ✅ FIX: Use atomic load for bucket counts
+            uint64_t bucket_count = __atomic_load_n(&h->bucket_counts[j], __ATOMIC_RELAXED);
+            
             written = snprintf(buffer + offset, buffer_size - offset,
-                              "\"} %lu\n", (unsigned long)h->bucket_counts[j]);
+                              "\"} %lu\n", bucket_count);
             offset += written;
         }
         
+        // ✅ FIX: Use atomic loads for sum and count
+        uint64_t total_count = __atomic_load_n(&h->count, __ATOMIC_RELAXED);
+        uint64_t total_sum = __atomic_load_n(&h->sum, __ATOMIC_RELAXED);
+        
         // Render _sum
         written = snprintf(buffer + offset, buffer_size - offset,
-                          "%s_sum{%s} %.6f\n",
-                          h->name, label_str, (double)h->sum);
+                          "%s_sum{%s} %lu\n",
+                          h->name, label_str, total_sum);
         offset += written;
         
         // Render _count
         written = snprintf(buffer + offset, buffer_size - offset,
                           "%s_count{%s} %lu\n",
-                          h->name, label_str, (unsigned long)h->count);
+                          h->name, label_str, total_count);
         offset += written;
         
         pthread_mutex_unlock(&h->lock);
@@ -410,10 +431,9 @@ char* metrics_registry_render_prometheus(metrics_registry_t *reg) {
 done:
     pthread_mutex_unlock(&reg->lock);
     
-    LOG_DEBUG("Rendered %zu bytes of metrics", offset);
+    LOG_DEBUG("Rendered %zu bytes of metrics (histograms included)", offset);
     return buffer;
 }
-
 histogram_metric_t* metrics_get_or_create_histogram(
     metrics_registry_t *reg,
     const char *name,

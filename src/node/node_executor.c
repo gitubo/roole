@@ -17,7 +17,6 @@
 // ============================================================================
 
 void* node_executor_thread_fn(void *arg) {
-    // OLD: unified_node_t *node = (unified_node_t*)arg;
     // NEW:
     node_state_t *state = (node_state_t*)arg;
     
@@ -267,65 +266,7 @@ void* node_executor_thread_fn(void *arg) {
 // ============================================================================
 // EXECUTOR MANAGEMENT
 // ============================================================================
-/*
-int node_start_executors(unified_node_t *node) {
-    if (!node || !node->capabilities.can_execute) {
-        LOG_INFO("Execution capability disabled, no executor threads started");
-        return RESULT_OK;
-    }
-    
-    if (node->num_executor_threads == 0) {
-        LOG_WARN("num_executor_threads is 0, defaulting to 1");
-        node->num_executor_threads = 1;
-    }
-    
-    // Allocate thread handles
-    node->executor_threads = calloc(node->num_executor_threads, sizeof(pthread_t));
-    if (!node->executor_threads) {
-        LOG_ERROR("Failed to allocate executor thread handles");
-        return RESULT_ERR_NOMEM;
-    }
-    
-    // Start threads
-    for (size_t i = 0; i < node->num_executor_threads; i++) {
-        if (pthread_create(&node->executor_threads[i], NULL, 
-                          node_executor_thread_fn, node) != 0) {
-            LOG_ERROR("Failed to start executor thread %zu", i);
-            
-            // Stop already started threads
-            node->shutdown_flag = 1;
-            for (size_t j = 0; j < i; j++) {
-                pthread_join(node->executor_threads[j], NULL);
-            }
-            
-            free(node->executor_threads);
-            node->executor_threads = NULL;
-            return RESULT_ERR_INVALID;
-        }
-    }
-    
-    LOG_INFO("Started %zu executor threads", node->num_executor_threads);
-    return RESULT_OK;
-}
 
-void node_stop_executors(unified_node_t *node) {
-    if (!node || !node->executor_threads) return;
-    
-    LOG_INFO("Stopping executor threads...");
-    
-    node->shutdown_flag = 1;
-    
-    // Wait for all threads to finish
-    for (size_t i = 0; i < node->num_executor_threads; i++) {
-        pthread_join(node->executor_threads[i], NULL);
-    }
-    
-    free(node->executor_threads);
-    node->executor_threads = NULL;
-    
-    LOG_INFO("All executor threads stopped");
-}
-*/
 int node_start_executors_ex(node_state_t *state, size_t num_threads) {
     if (!state) return RESULT_ERR_INVALID;
     

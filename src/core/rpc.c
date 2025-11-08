@@ -6,6 +6,7 @@
 #include "roole/common.h"
 #include "roole/logger.h"
 #include "roole/service_registry.h"
+#include "roole/node_state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -527,12 +528,31 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
     //g_service_table = service_table;
     set_service_table(service_table);
 
+    // Get node state to check shutdown flag
+    service_registry_t *registry = service_registry_global();
+    node_state_t *state = NULL;
+    if (registry) {
+        state = (node_state_t*)service_registry_get(registry, 
+                                                     SERVICE_TYPE_NODE_STATE, 
+                                                     "main");
+    }
+
     // Main event loop
     while (1) {
+        if (state && state->shutdown_flag) {
+            LOG_INFO("RPC server: shutdown flag detected, exiting event loop");
+            break;
+        }
+
         int n = epoll_wait(listener->epoll_fd, events, MAX_EVENTS, -1);
         if (n == -1) {
             if (errno == EINTR) continue;
             LOG_ERROR("epoll_wait failed");
+            break;
+        }
+
+        if (state && state->shutdown_flag) {
+            LOG_INFO("RPC server: shutdown flag detected after epoll_wait");
             break;
         }
 
@@ -641,7 +661,9 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
         }
     }
 
-    return -1;
+    LOG_INFO("RPC server event loop exited");
+    logger_pop_component();
+    return 0; 
 }
 
 // ============================================================================
