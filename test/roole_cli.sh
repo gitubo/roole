@@ -2,10 +2,10 @@
 # roole-interactive-cli.sh - Interactive Menu for Roole Manual Testing
 
 # --- Configuration ---
-ROUTER_CONFIG="config/router.ini"
-WORKER_CONFIG="config/worker_100.ini"
-ROUTER_LOG="logs/manual_router.log"
-WORKER_LOG="logs/manual_worker.log"
+ROUTER_CONFIG="./config/router.ini"
+WORKER_CONFIG="./config/worker_100.ini"
+ROUTER_LOG="./logs/manual_router.log"
+WORKER_LOG="./logs/manual_worker.log"
 METRICS_PORT="7002"
 CLIENT_HOST="127.0.0.1"
 CLIENT_PORT="8081"

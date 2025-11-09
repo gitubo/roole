@@ -465,12 +465,27 @@ int handle_add_dag(rpc_async_context_t *context,
     LOG_INFO("Propagating DAG %u to all workers...", dag_id);
     
     peer_pool_t *pool = node_state_get_peer_pool(state);
+    cluster_view_t *view = node_state_get_cluster_view(state); 
     const node_identity_t *identity = node_state_get_identity(state);
     
     // Get list of all alive workers
     node_id_t worker_ids[MAX_PEERS];
-    size_t worker_count = peer_pool_list_by_capability(pool, 1, worker_ids, MAX_PEERS);
-    
+    //size_t worker_count = peer_pool_list_by_capability(pool, 1, worker_ids, MAX_PEERS);
+    size_t worker_count = 0;
+
+    pthread_rwlock_rdlock(&view->lock);
+    for (size_t i = 0; i < view->count; i++) {
+        cluster_member_t *member = &view->members[i];
+        
+        // Only select alive WORKER nodes (exclude self)
+        if (member->node_type == NODE_TYPE_WORKER && 
+            member->status == NODE_STATUS_ALIVE &&
+            member->node_id != identity->node_id &&
+            worker_count < MAX_PEERS) {
+            worker_ids[worker_count++] = member->node_id;
+        }
+    }
+    pthread_rwlock_unlock(&view->lock);
     LOG_INFO("Found %zu workers to sync DAG catalog", worker_count);
     
     // Serialize DAG

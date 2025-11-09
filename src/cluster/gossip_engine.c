@@ -6,6 +6,9 @@
 #include "roole/gossip.h"
 #include "roole/common.h"
 #include "roole/config.h"
+#include "roole/node_state.h"
+#include "roole/node.h"
+#include "roole/service_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -693,6 +696,10 @@ static void handle_join_message(gossip_engine_t *engine,
 // WORKER JOIN HANDLER (NEW)
 // ============================================================================
 
+// ============================================================================
+// WORKER JOIN HANDLER (Complete function from gossip_engine.c)
+// ============================================================================
+
 static void handle_worker_join_message(gossip_engine_t *engine,
                                        const gossip_message_t *msg,
                                        const char *src_ip,
@@ -772,6 +779,47 @@ static void handle_worker_join_message(gossip_engine_t *engine,
             engine->event_callback(upd->node_id, NODE_TYPE_WORKER,
                                  src_ip, upd->data_port,
                                  event, engine->event_callback_data);
+        }
+        
+        // ✅ NEW: Add worker to peer pool and establish DATA channel
+        // (No need to check node_type again - already verified at function start)
+        // Get peer pool from service registry
+        service_registry_t *registry = service_registry_global();
+        if (registry) {
+            node_state_t *state = (node_state_t*)service_registry_get(
+                registry, SERVICE_TYPE_NODE_STATE, "main"
+            );
+            
+            if (state) {
+                peer_pool_t *pool = node_state_get_peer_pool(state);
+                
+                // Add worker to peer pool
+                int add_result = peer_pool_add(pool, upd->node_id, src_ip,
+                                               upd->gossip_port, upd->data_port);
+                
+                if (add_result == RESULT_OK) {
+                    LOG_INFO("Added worker %u to peer pool", upd->node_id);
+                    
+                    // Establish DATA channel
+                    peer_info_t *peer = peer_pool_get(pool, upd->node_id);
+                    if (peer && !peer->data_channel) {
+                        peer->data_channel = safe_malloc(sizeof(rpc_channel_t));
+                        if (peer->data_channel) {
+                            if (rpc_client_connect(peer->data_channel, src_ip,
+                                                 upd->data_port, RPC_CHANNEL_DATA, 4096) == 0) {
+                                LOG_INFO("DATA channel established to worker %u", upd->node_id);
+                            } else {
+                                LOG_WARN("Failed to connect DATA channel to worker %u", upd->node_id);
+                                safe_free(peer->data_channel);
+                                peer->data_channel = NULL;
+                            }
+                        }
+                    }
+                    peer_pool_release(pool);
+                } else {
+                    LOG_DEBUG("Worker %u already in peer pool", upd->node_id);
+                }
+            }
         }
         
         // Propagate join/rejoin to cluster
