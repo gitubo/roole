@@ -537,6 +537,14 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
                                                      "main");
     }
 
+    if (state) {
+        pthread_mutex_lock(&state->rpc_ready_lock);
+        state->rpc_server_ready = 1;
+        pthread_cond_broadcast(&state->rpc_ready_cond);
+        pthread_mutex_unlock(&state->rpc_ready_lock);
+        LOG_INFO("RPC server ready - all channels bound and listening");
+    }
+
     // Main event loop
     while (1) {
         if (state && state->shutdown_flag) {

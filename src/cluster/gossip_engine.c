@@ -808,6 +808,34 @@ static void handle_worker_join_message(gossip_engine_t *engine,
                             if (rpc_client_connect(peer->data_channel, src_ip,
                                                  upd->data_port, RPC_CHANNEL_DATA, 4096) == 0) {
                                 LOG_INFO("DATA channel established to worker %u", upd->node_id);
+
+                                // This catches any remaining edge cases
+                                uint8_t test_buffer[64];
+                                size_t test_msg_len = rpc_pack_message(
+                                    test_buffer,
+                                    engine->my_id,
+                                    0,  // request_id
+                                    RPC_TYPE_REQUEST,
+                                    RPC_STATUS_SUCCESS,
+                                    FUNC_ID_HEARTBEAT,  // Use heartbeat as test
+                                    NULL,
+                                    0
+                                );
+                                
+                                // Try sending (non-blocking test)
+                                ssize_t sent = send(peer->data_channel->socket_fd, 
+                                                test_buffer, test_msg_len, MSG_DONTWAIT);
+                                if (sent > 0) {
+                                    LOG_DEBUG("DATA channel to worker %u verified with test message", 
+                                            upd->node_id);
+                                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                    // Socket is valid but would block - that's OK
+                                    LOG_DEBUG("DATA channel to worker %u ready (would block on send)", 
+                                            upd->node_id);
+                                } else {
+                                    LOG_WARN("DATA channel test send failed: %s (but channel created)", 
+                                            strerror(errno));
+                                }
                             } else {
                                 LOG_WARN("Failed to connect DATA channel to worker %u", upd->node_id);
                                 safe_free(peer->data_channel);

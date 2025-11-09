@@ -101,6 +101,11 @@ typedef struct node_state {
     _Atomic uint64_t messages_processed;
     _Atomic uint64_t messages_failed;
     _Atomic uint64_t messages_routed;
+
+    // Synchronization for startup
+    volatile int rpc_server_ready;
+    pthread_mutex_t rpc_ready_lock;
+    pthread_cond_t rpc_ready_cond;
     
 } node_state_t;
 

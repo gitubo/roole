@@ -434,6 +434,7 @@ done:
     LOG_DEBUG("Rendered %zu bytes of metrics (histograms included)", offset);
     return buffer;
 }
+
 histogram_metric_t* metrics_get_or_create_histogram(
     metrics_registry_t *reg,
     const char *name,
