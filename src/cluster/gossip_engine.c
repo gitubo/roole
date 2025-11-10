@@ -1035,6 +1035,11 @@ static void dispatch_message(gossip_engine_t *engine,
 // UDP LISTENER THREAD - FIXED: Use select() with timeout to prevent blocking
 // ============================================================================
 
+// Apply this patch to src/cluster/gossip_engine.c
+// Add enhanced debug logging to diagnose the issue
+
+// Replace the gossip_listener_thread function with this version:
+
 static void* gossip_listener_thread(void *arg) {
     gossip_engine_t *engine = (gossip_engine_t*)arg;
     
@@ -1054,7 +1059,7 @@ static void* gossip_listener_thread(void *arg) {
         FD_ZERO(&read_fds);
         FD_SET(engine->udp_socket, &read_fds);
         
-        // Timeout: 50ms - this prevents blocking forever and allows frequent checking
+        // Timeout: 50ms
         tv.tv_sec = 0;
         tv.tv_usec = 50000;
         
@@ -1068,9 +1073,12 @@ static void* gossip_listener_thread(void *arg) {
         }
         
         if (ret == 0) {
-            // Timeout - no data available, continue loop
+            // Timeout - no data available
             continue;
         }
+        
+        // ===== ENHANCED DEBUG LOGGING =====
+        LOG_DEBUG("UDP socket has data available, attempting recvfrom()");
         
         // Data is available, read it
         ssize_t received = gossip_recv_udp(engine->udp_socket, recv_buffer,
@@ -1078,7 +1086,6 @@ static void* gossip_listener_thread(void *arg) {
                                           sizeof(src_ip), &src_port);
         
         if (received < 0) {
-            // EAGAIN/EWOULDBLOCK should not happen after select(), but handle it
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
@@ -1088,11 +1095,19 @@ static void* gossip_listener_thread(void *arg) {
         }
         
         if (received == 0) {
-            // Connection closed (shouldn't happen with UDP)
             continue;
         }
 
-        LOG_DEBUG("UDP received %zd bytes from %s:%u", received, src_ip, src_port); 
+        LOG_INFO("UDP received %zd bytes from %s:%u", received, src_ip, src_port); 
+        
+        // ===== DEBUG: Dump first 32 bytes of received data =====
+        LOG_DEBUG("Raw data (first 32 bytes):");
+        for (ssize_t i = 0; i < received && i < 32; i += 8) {
+            LOG_DEBUG("  [%02zd-%02zd]: %02x %02x %02x %02x %02x %02x %02x %02x",
+                     i, i+7,
+                     recv_buffer[i], recv_buffer[i+1], recv_buffer[i+2], recv_buffer[i+3],
+                     recv_buffer[i+4], recv_buffer[i+5], recv_buffer[i+6], recv_buffer[i+7]);
+        }
         
         if (received < 16) {
             LOG_WARN("Received malformed gossip packet (too small: %zd bytes)", received);
@@ -1100,10 +1115,17 @@ static void* gossip_listener_thread(void *arg) {
         }
         
         gossip_message_t msg;
-        if (gossip_message_deserialize(recv_buffer, received, &msg) != 0) {
-            LOG_WARN("Failed to deserialize gossip message from %s:%u", src_ip, src_port);
+        int deserialize_result = gossip_message_deserialize(recv_buffer, received, &msg);
+        
+        // ===== DEBUG: Show deserialization result =====
+        if (deserialize_result != 0) {
+            LOG_ERROR("Failed to deserialize gossip message from %s:%u", src_ip, src_port);
+            LOG_ERROR("  Received %zd bytes, deserialize returned %d", received, deserialize_result);
             continue;
         }
+        
+        LOG_INFO("Deserialized message: version=%u type=%u sender=%u seq=%lu updates=%u",
+                msg.version, msg.msg_type, msg.sender_id, msg.sequence_num, msg.num_updates);
         
         if (msg.sender_id == engine->my_id) {
             LOG_DEBUG("Ignoring message from self");
@@ -1122,7 +1144,7 @@ static void* gossip_listener_thread(void *arg) {
                   (msg.msg_type == GOSSIP_MSG_LEAVE) ? "LEAVE" : "UNKNOWN",
                   msg.sender_id, src_ip, src_port, msg.sequence_num, msg.num_updates);
         
-        // CRITICAL: Process message immediately without blocking
+        // Process message
         dispatch_message(engine, &msg, src_ip, src_port);
     }
     
