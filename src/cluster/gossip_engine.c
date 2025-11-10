@@ -1100,15 +1100,6 @@ static void* gossip_listener_thread(void *arg) {
 
         LOG_INFO("UDP received %zd bytes from %s:%u", received, src_ip, src_port); 
         
-        // ===== DEBUG: Dump first 32 bytes of received data =====
-        LOG_DEBUG("Raw data (first 32 bytes):");
-        for (ssize_t i = 0; i < received && i < 32; i += 8) {
-            LOG_DEBUG("  [%02zd-%02zd]: %02x %02x %02x %02x %02x %02x %02x %02x",
-                     i, i+7,
-                     recv_buffer[i], recv_buffer[i+1], recv_buffer[i+2], recv_buffer[i+3],
-                     recv_buffer[i+4], recv_buffer[i+5], recv_buffer[i+6], recv_buffer[i+7]);
-        }
-        
         if (received < 16) {
             LOG_WARN("Received malformed gossip packet (too small: %zd bytes)", received);
             continue;

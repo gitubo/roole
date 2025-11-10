@@ -321,12 +321,12 @@ int handle_sync_catalog(rpc_async_context_t *context,
              in_len, context->sender_id, context->request_id);
 
     node_state_t *state = get_node_state();
-    
+    /*
     if (!state || in_len < sizeof(dag_t)) {
         LOG_ERROR("[RPC] Message length (%u) does not fit the DAG message length (%u)", in_len, sizeof(dag_t));
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
-    
+    */
     dag_t dag;
     if (dag_deserialize(in_data, in_len, &dag) != RESULT_OK) {
         LOG_ERROR("[RPC] Failed to deserialize DAG");
