@@ -316,9 +316,14 @@ int handle_execution_update(rpc_async_context_t *context,
 
 int handle_sync_catalog(rpc_async_context_t *context,
                        const uint8_t *in_data, size_t in_len) {
+
+    LOG_DEBUG("[SYNC_CATALOG] Handler called: in_len=%zu, sender=%u, request_id=%u",
+             in_len, context->sender_id, context->request_id);
+
     node_state_t *state = get_node_state();
     
     if (!state || in_len < sizeof(dag_t)) {
+        LOG_ERROR("[RPC] Message length (%u) does not fit the DAG message length (%u)", in_len, sizeof(dag_t));
         return rpc_send_async_response(context, RPC_STATUS_BAD_ARGUMENT, NULL, 0);
     }
     
@@ -332,6 +337,7 @@ int handle_sync_catalog(rpc_async_context_t *context,
     
     int result = dag_catalog_add(catalog, &dag);
     if (result == RESULT_ERR_EXISTS) {
+        LOG_ERROR("[RPC] Failed in adding the DAG to the local catalog");
         result = dag_catalog_update(catalog, &dag);
     }
     

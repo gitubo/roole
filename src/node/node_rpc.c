@@ -120,7 +120,7 @@ int node_start_rpc_servers_ex(node_state_t *state,
     const node_capabilities_t *caps = node_state_get_capabilities(state);
     
     // Register in service registry
-    /*
+    
     service_registry_t *registry = service_registry_global();
     if (registry) {
         service_registry_register(registry, SERVICE_TYPE_NODE_STATE, 
@@ -128,7 +128,7 @@ int node_start_rpc_servers_ex(node_state_t *state,
         service_registry_register(registry, SERVICE_TYPE_RPC_SERVER,
                                  "service_table", service_table);
     }
-    */
+    
     
     LOG_INFO("========================================");
     LOG_INFO("Starting RPC servers:");

@@ -436,6 +436,9 @@ static void process_buffered_data(rpc_channel_t *channel) {
     rpc_header_t header;
     size_t processed_bytes = 0;
     
+    LOG_DEBUG("[RPC] process_buffered_data: channel FD=%d, rx_data_len=%zu",
+              channel->socket_fd, channel->rx_data_len);
+
     rpc_service_entry_t *g_service_table = get_service_table();
     if (g_service_table == NULL) {
         LOG_ERROR("[RPC] Service table not initialized. Dropping requests");
@@ -451,7 +454,13 @@ static void process_buffered_data(rpc_channel_t *channel) {
             return;
         }
 
+        LOG_DEBUG("[RPC] Unpacked header: func_id=%u, total_len=%u, request_id=%u, sender=%u",
+                  header.func_id, header.total_len, header.request_id, header.sender_id);
+
+
         if (channel->rx_data_len - processed_bytes < header.total_len) {
+            LOG_DEBUG("[RPC] Partial message: have %zu bytes, need %u bytes - waiting",
+                      channel->rx_data_len - processed_bytes, header.total_len);
             break; // Partial message, wait for more data
         }
         
@@ -463,6 +472,9 @@ static void process_buffered_data(rpc_channel_t *channel) {
         size_t payload_len = header.total_len - RPC_HEADER_SIZE;
         uint8_t *in_payload = channel->rx_buffer + processed_bytes + RPC_HEADER_SIZE;
         
+        LOG_INFO("[RPC] Received request: func_id=%u, request_id=%u, payload_len=%zu",
+                 func_id, req_id, payload_len);
+
         // Create async context
         rpc_async_context_t *context = (rpc_async_context_t *)malloc(sizeof(rpc_async_context_t));
         if (!context) {
@@ -486,6 +498,8 @@ static void process_buffered_data(rpc_channel_t *channel) {
         }
         
         if (handler != NULL) {
+            LOG_INFO("[RPC] Handler found for func_id=%u, executing...", func_id);
+            
             // Add to pending contexts
             context->next = g_pending_contexts;
             g_pending_contexts = context;
@@ -627,12 +641,16 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
                 if (events[i].events & EPOLLIN) {
                     ssize_t bytes_read;
 
+                    LOG_DEBUG("[RPC] EPOLLIN event on FD %d, attempting read...", client_fd);
+
                     // Read until EAGAIN/EWOULDBLOCK
                     while (channel->rx_data_len < channel->rx_buffer_size) {
                         bytes_read = read(client_fd, channel->rx_buffer + channel->rx_data_len,
                                         channel->rx_buffer_size - channel->rx_data_len);
 
                         if (bytes_read > 0) {
+                            LOG_DEBUG("[RPC] Read %zd bytes from FD %d (total buffered: %zu)",
+                                    bytes_read, client_fd, channel->rx_data_len + bytes_read);
                             channel->rx_data_len += bytes_read;
                         }
                         else if (bytes_read == 0) {
@@ -641,15 +659,18 @@ static int rpc_multi_channel_event_loop(rpc_multi_channel_listener_t *listener,
                             break;
                         }
                         else if (bytes_read == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+                            LOG_DEBUG("[RPC] Would block on FD %d, processing buffered data", client_fd);
                             break;
                         }
                         else {
+                            LOG_ERROR("[RPC] Read error on FD %d: %s", client_fd, strerror(errno));
                             close_connection = 1;
                             break;
                         }
                     }
 
                     if (!close_connection && channel->rx_data_len > 0) {
+                        LOG_DEBUG("[RPC] Calling process_buffered_data for FD %d", client_fd);
                         process_buffered_data(channel);
                     }
 
